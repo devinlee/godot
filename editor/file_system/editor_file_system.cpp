@@ -29,6 +29,10 @@
 /**************************************************************************/
 
 #include "editor_file_system.h"
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_METON_ENGINE_ENABLED
+#include "modules/meton_engine/material_admission.h"
+#endif
 
 #include "core/config/project_settings.h"
 #include "core/extension/gdextension_manager.h"
@@ -588,6 +592,10 @@ bool EditorFileSystem::_is_test_for_reimport_needed(const String &p_path, uint64
 }
 
 bool EditorFileSystem::_test_for_reimport(const String &p_path, const String &p_expected_import_md5) {
+#ifdef MODULE_METON_ENGINE_ENABLED
+	// 执行副本的副产物已按生产回执封存。文件系统扫描只登记它，重导入属于独立准备代次。
+	if (meton::bridge::materials_active()) return false;
+#endif
 	if (p_expected_import_md5.is_empty()) {
 		// Marked as reimportation needed.
 		return true;
@@ -2811,6 +2819,9 @@ Error EditorFileSystem::_reimport_group(const String &p_group_file, const Vector
 }
 
 Error EditorFileSystem::_reimport_file(const String &p_file, const HashMap<StringName, Variant> &p_custom_options, const String &p_custom_importer, Variant *p_generator_parameters, bool p_update_file_system) {
+#ifdef MODULE_METON_ENGINE_ENABLED
+	if (meton::bridge::materials_active()) return ERR_UNAUTHORIZED;
+#endif
 	print_verbose(vformat("EditorFileSystem: Importing file: %s", p_file));
 	uint64_t start_time = OS::get_singleton()->get_ticks_msec();
 
@@ -3467,6 +3478,9 @@ Error EditorFileSystem::_resource_import(const String &p_path) {
 
 Ref<Resource> EditorFileSystem::_load_resource_on_startup(ResourceFormatImporter *p_importer, const String &p_path, Error *r_error, bool p_use_sub_threads, float *r_progress, ResourceLoaderConstants::CacheMode p_cache_mode) {
 	ERR_FAIL_NULL_V(p_importer, Ref<Resource>());
+#ifdef MODULE_METON_ENGINE_ENABLED
+	if (meton::bridge::materials_active()) return p_importer->load_internal(p_path, r_error, p_use_sub_threads, r_progress, p_cache_mode, false);
+#endif
 
 	if (!FileAccess::exists(p_path)) {
 		ERR_FAIL_V_MSG(Ref<Resource>(), vformat("Failed loading resource: %s. The file doesn't seem to exist.", p_path));

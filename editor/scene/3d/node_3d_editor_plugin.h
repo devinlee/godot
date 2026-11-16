@@ -534,6 +534,8 @@ public:
 			AcceptDialog *p_accept);
 
 	SubViewport *get_viewport_node() { return viewport; }
+	/** 将受控滚轮只交给本视口的相机导航控制器。 */
+	bool zoom_scene_view(bool p_in, Point2 p_position);
 	Camera3D *get_camera_3d() { return camera; } // return the default camera object.
 	Control *get_surface() { return surface; }
 

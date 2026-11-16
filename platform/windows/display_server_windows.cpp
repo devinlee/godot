@@ -37,6 +37,10 @@
 #include "tts_windows.h"
 #include "wgl_detect_version.h"
 #include "winrt_utils.h"
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_METON_ENGINE_ENABLED
+#include "modules/meton_engine/material_admission.h"
+#endif
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
@@ -1948,6 +1952,13 @@ void DisplayServerWindows::show_window(DisplayServerEnums::WindowID p_id) {
 	ERR_FAIL_COND(!windows.has(p_id));
 
 	WindowData &wd = windows[p_id];
+#ifdef MODULE_METON_ENGINE_ENABLED
+	if (meton::bridge::material_surface()) {
+		// 真实可见窗口属于 E01，Godot 初始化和打开场景不得抢占桌面焦点。
+		wd.initialized = true;
+		return;
+	}
+#endif
 	popup_open(p_id);
 
 	if (p_id != DisplayServerEnums::MAIN_WINDOW_ID) {

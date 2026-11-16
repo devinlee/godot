@@ -29,6 +29,10 @@
 /**************************************************************************/
 
 #include "os_windows.h"
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_METON_ENGINE_ENABLED
+#include "modules/meton_engine/material_admission.h"
+#endif
 
 #include "display_server_windows.h"
 #include "lang_table.h"
@@ -2426,6 +2430,10 @@ String OS_Windows::get_data_path() const {
 }
 
 String OS_Windows::get_cache_path() const {
+#ifdef MODULE_METON_ENGINE_ENABLED
+	// Windows 会在 LOCALAPPDATA 后追加 Packages/<profile>/AC。Godot 的缓存使用宿主已固定的专属目录。
+	if (meton::bridge::materials_active()) return meton::bridge::material_cache_directory();
+#endif
 	static String cache_path_cache;
 	if (cache_path_cache.is_empty()) {
 		if (has_environment("LOCALAPPDATA")) {
@@ -2506,6 +2514,9 @@ String OS_Windows::get_system_dir(SystemDir p_dir, bool p_shared_storage) const 
 }
 
 String OS_Windows::get_user_data_dir(const String &p_user_dir) const {
+#ifdef MODULE_METON_ENGINE_ENABLED
+	if (meton::bridge::materials_active()) return meton::bridge::material_user_directory();
+#endif
 	return get_data_path().path_join(p_user_dir).replace_char('\\', '/');
 }
 

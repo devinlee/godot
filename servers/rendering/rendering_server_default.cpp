@@ -38,6 +38,10 @@
 #include "servers/rendering/renderer_scene_cull.h"
 #include "servers/rendering/rendering_device.h"
 #include "servers/rendering/rendering_server_globals.h"
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_METON_ENGINE_ENABLED
+#include "modules/meton_engine/surface_runtime_hooks.h"
+#endif
 
 #ifndef XR_DISABLED
 #include "servers/xr/xr_server.h"
@@ -106,13 +110,23 @@ void RenderingServerDefault::_draw(bool p_swap_buffers, double frame_step) {
 	RSG::scene->render_probes();
 
 	GodotProfileZoneGrouped(_profile_zone, "viewport->draw_viewports");
+#ifdef MODULE_METON_ENGINE_ENABLED
+	meton::bridge::surface_frame_begin();
+#endif
 	RSG::viewport->draw_viewports(p_swap_buffers);
 
 	GodotProfileZoneGrouped(_profile_zone, "canvas_render->update");
 	RSG::canvas_render->update();
 
 	GodotProfileZoneGrouped(_profile_zone, "rasterizer->end_frame");
+#ifdef MODULE_METON_ENGINE_ENABLED
+	// 当帧视口命令已记录；RD 负责源与中间纹理的布局，G03 不从 main 猜测提交时点。
+	meton::bridge::surface_frame_capture();
+#endif
 	RSG::rasterizer->end_frame(p_swap_buffers);
+#ifdef MODULE_METON_ENGINE_ENABLED
+	meton::bridge::surface_frame_submitted();
+#endif
 
 #ifndef XR_DISABLED
 	if (xr_server != nullptr) {

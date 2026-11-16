@@ -1448,6 +1448,15 @@ void CanvasItemEditor::_pan_callback(Vector2 p_scroll_vec, Ref<InputEvent> p_eve
 	update_viewport();
 }
 
+void CanvasItemEditor::zoom_scene_view(bool p_in, Point2 p_position) {
+	Ref<InputEventMouseButton> wheel;
+	wheel.instantiate();
+	wheel->set_button_index(p_in ? MouseButton::WHEEL_UP : MouseButton::WHEEL_DOWN);
+	wheel->set_pressed(true);
+	wheel->set_position(p_position);
+	_zoom_callback(p_in ? 2.0f : 0.5f, p_position, wheel);
+}
+
 void CanvasItemEditor::_zoom_callback(float p_zoom_factor, Vector2 p_origin, Ref<InputEvent> p_event) {
 	Ref<InputEventMouseButton> mb = p_event;
 	if (mb.is_valid()) {

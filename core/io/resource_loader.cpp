@@ -29,6 +29,10 @@
 /**************************************************************************/
 
 #include "resource_loader.h"
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_METON_ENGINE_ENABLED
+#include "modules/meton_engine/material_admission.h"
+#endif
 
 #include "core/config/engine.h"
 #include "core/config/project_settings.h"
@@ -273,6 +277,13 @@ ResourceLoader::LoadToken::~LoadToken() {
 }
 
 Ref<Resource> ResourceLoader::_load(const String &p_path, const String &p_original_path, const String &p_type_hint, CacheMode p_cache_mode, Error *r_error, bool p_use_sub_threads, float *r_progress) {
+#ifdef MODULE_METON_ENGINE_ENABLED
+	// 重映射后的目标仍须属于同一闭包，不能从可写缓存或外部路径取得替代资源。
+	if (!meton::bridge::material_load_allowed(p_path, p_original_path)) {
+		if (r_error) *r_error = ERR_UNAUTHORIZED;
+		ERR_FAIL_V_MSG(Ref<Resource>(), "METON_RESOURCE_ADMISSION_REJECTED");
+	}
+#endif
 	const String &original_path = p_original_path.is_empty() ? p_path : p_original_path;
 	load_nesting++;
 
@@ -748,6 +759,9 @@ Ref<Resource> ResourceLoader::load(const String &p_path, const String &p_type_hi
 }
 
 Ref<ResourceLoader::LoadToken> ResourceLoader::_load_start(const String &p_path, const String &p_type_hint, LoadThreadMode p_thread_mode, CacheMode p_cache_mode, bool p_for_user) {
+#ifdef MODULE_METON_ENGINE_ENABLED
+	ERR_FAIL_COND_V_MSG(!meton::bridge::material_resource_allowed(p_path), Ref<ResourceLoader::LoadToken>(), "METON_RESOURCE_ADMISSION_REJECTED");
+#endif
 	String local_path = _validate_local_path(p_path);
 	ERR_FAIL_COND_V(local_path.is_empty(), Ref<ResourceLoader::LoadToken>());
 

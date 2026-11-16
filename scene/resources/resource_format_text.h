@@ -119,6 +119,9 @@ private:
 
 	friend class ResourceFormatLoaderText;
 	friend class ResourceFormatSaverText;
+#ifdef TOOLS_ENABLED
+	friend class MetonSceneHistoryLoader;
+#endif
 
 	Error error = OK;
 

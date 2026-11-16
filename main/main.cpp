@@ -84,6 +84,11 @@
 #include "servers/text/text_server_dummy.h"
 
 #include "modules/register_module_types.h"
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_METON_ENGINE_ENABLED
+#include "modules/meton_engine/surface_runtime_hooks.h"
+#include "modules/meton_engine/material_admission.h"
+#endif
 #include "platform/register_platform_apis.h"
 
 // 2D
@@ -1158,6 +1163,16 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 	// Exit error code used in the `goto error` conditions.
 	// It's returned as the program exit code. ERR_HELP is special cased and handled as success (0).
 	Error exit_err = ERR_INVALID_PARAMETER;
+
+#ifdef MODULE_METON_ENGINE_ENABLED
+	// 先核对原始材料与启动参数，不能等项目配置、PCK 或扩展缓存已经被读取后再拒绝。
+	if (!meton::bridge::admit_materials(args)) {
+		ERR_PRINT("METON_MATERIAL_ADMISSION_REJECTED");
+		goto error;
+	}
+	if (meton::bridge::materials_active()) packed_data->set_disabled(true);
+	if (meton::bridge::preparing_material_textures()) args.erase("--meton-prepare-png");
+#endif
 
 	I = args.front();
 	while (I) {
@@ -2258,6 +2273,14 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 	}
 
 	// Initialize user data dir.
+#ifdef MODULE_METON_ENGINE_ENABLED
+	if (meton::bridge::materials_active()) {
+		if (!meton::bridge::material_storage_matches()) {
+			ERR_PRINT("METON_GENERATION_STORAGE_MISMATCH");
+			goto error;
+		}
+	}
+#endif
 	OS::get_singleton()->ensure_user_data_dir();
 
 	OS::get_singleton()->set_low_processor_usage_mode(GLOBAL_DEF("application/run/low_processor_mode", false));
@@ -2284,7 +2307,11 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 	if (!editor) {
 		ResourceUID::get_singleton()->enable_reverse_cache();
 	}
-	ResourceUID::get_singleton()->load_from_cache(true); // Load UUIDs from cache.
+#ifdef MODULE_METON_ENGINE_ENABLED
+	if (meton::bridge::materials_active()) meton::bridge::install_material_uids();
+	else
+#endif
+		ResourceUID::get_singleton()->load_from_cache(true); // Load UUIDs from cache.
 	ProjectSettings::get_singleton()->fix_autoload_paths(); // Handles autoloads saved as UID.
 
 	if (ProjectSettings::get_singleton()->has_custom_feature("dedicated_server")) {
@@ -2337,6 +2364,9 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 			max_files = GLOBAL_GET("debug/file_logging/max_log_files");
 		}
 		OS::get_singleton()->add_logger(memnew(RotatedFileLogger(base_path, max_files)));
+#ifdef MODULE_METON_ENGINE_ENABLED
+		if (meton::bridge::materials_active()) print_verbose("Meton generation storage verified: user://, cache, settings");
+#endif
 	}
 
 	if (main_args.is_empty() && String(GLOBAL_GET("application/run/main_scene")) == "") {
@@ -4015,6 +4045,10 @@ int Main::start() {
 	OS::get_singleton()->benchmark_begin_measure("Startup", "Main::Start");
 
 	ERR_FAIL_COND_V(!_start_success, EXIT_FAILURE);
+#if defined(MODULE_METON_ENGINE_ENABLED) && defined(TOOLS_ENABLED)
+	// 准备代次只使用已初始化的内置图像注册项，结束后直接进入平台清理。
+	if (meton::bridge::preparing_material_textures()) return meton::bridge::run_material_texture_preparation() ? EXIT_SUCCESS : EXIT_FAILURE;
+#endif
 
 	bool has_icon = false;
 	String positional_arg;
@@ -5081,6 +5115,10 @@ bool Main::iteration() {
 	bool wants_present = (DisplayServer::get_singleton()->can_any_window_draw() ||
 								 DisplayServer::get_singleton()->has_additional_outputs()) &&
 			RenderingServer::get_singleton()->is_render_loop_enabled();
+
+#ifdef MODULE_METON_ENGINE_ENABLED
+	wants_present = meton::bridge::surface_main_iteration(wants_present);
+#endif
 
 	if (wants_present || has_pending_resources_for_processing) {
 		wants_present |= force_redraw_requested;

@@ -1,0 +1,18 @@
+#!/usr/bin/env python
+from misc.utility.scons_hints import *
+import os
+
+Import("env")
+Import("env_modules")
+
+contracts = env["meton_contracts_dir"]
+if not contracts or not os.path.isfile(os.path.join(contracts, "surface_wire.generated.hpp")):
+    raise RuntimeError("meton_engine requires the pinned G01 generated contract directory")
+env_meton = env_modules.Clone()
+env_meton.AppendUnique(CPPPATH=[contracts])
+if env["meton_surface_fixture"]:
+    fixture = env["meton_fixture_config_dir"]
+    if not fixture or not os.path.isfile(os.path.join(fixture, "meton_fixture_config.generated.h")):
+        raise RuntimeError("meton surface fixture requires pinned configuration")
+    env_meton.AppendUnique(CPPPATH=[fixture], CPPDEFINES=["METON_SURFACE_FIXTURE_ENABLED"])
+env_meton.add_source_files(env.modules_sources, "*.cpp")

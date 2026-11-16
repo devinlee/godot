@@ -11340,3 +11340,12 @@ Node3DEditorPlugin::Node3DEditorPlugin() {
 
 	spatial_editor->hide();
 }
+bool Node3DEditorViewport::zoom_scene_view(bool p_in, Point2 p_position) {
+	Ref<InputEventMouseButton> wheel;
+	wheel.instantiate();
+	wheel->set_button_index(p_in ? MouseButton::WHEEL_UP : MouseButton::WHEEL_DOWN);
+	wheel->set_pressed(true);
+	wheel->set_position(p_position);
+	return view_3d_controller->gui_input(wheel, Rect2(Point2(), viewport->get_size()));
+}
+

@@ -587,6 +587,8 @@ public:
 	real_t snap_angle(real_t p_target, real_t p_start = 0) const;
 
 	Transform2D get_canvas_transform() const { return transform; }
+	/** 受控场景视口只按相机滚轮缩放，不进入选择、工具和编辑快捷键分派。 */
+	void zoom_scene_view(bool p_in, Point2 p_position);
 
 	static CanvasItemEditor *get_singleton() { return singleton; }
 	Dictionary get_state() const;

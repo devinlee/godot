@@ -206,6 +206,9 @@
 #endif // ANDROID_ENABLED
 
 #include "modules/modules_enabled.gen.h" // For gdscript, mono.
+#ifdef MODULE_METON_ENGINE_ENABLED
+#include "modules/meton_engine/material_admission.h"
+#endif
 
 #include <cstdlib>
 
@@ -1015,7 +1018,12 @@ void EditorNode::_notification(int p_what) {
 			// Save the project after opening to mark it as last modified, except in headless mode.
 			// Also use this opportunity to ensure default settings are applied to new projects created from the command line
 			// using `touch project.godot`.
-			if (DisplayServer::get_singleton()->window_can_draw()) {
+			bool mark_project_modified = DisplayServer::get_singleton()->window_can_draw();
+#ifdef MODULE_METON_ENGINE_ENABLED
+			// 受控执行副本由准备阶段封存；打开视口不构成用户保存项目的操作。
+			mark_project_modified = mark_project_modified && !meton::bridge::materials_active();
+#endif
+			if (mark_project_modified) {
 				const String project_settings_path = ProjectSettings::get_singleton()->get_resource_path().path_join("project.godot");
 				// Check the file's size in bytes as an optimization. If it's under 10 bytes, the file is assumed to be empty.
 				if (FileAccess::get_size(project_settings_path) < 10) {
