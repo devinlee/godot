@@ -671,6 +671,11 @@ int EditorData::add_edited_scene(int p_at_pos) {
 	return p_at_pos;
 }
 
+List<Node *> EditorData::get_scene_selection(int p_idx) const {
+	ERR_FAIL_INDEX_V(p_idx, edited_scene.size(), List<Node *>());
+	return List<Node *>(edited_scene[p_idx].selection);
+}
+
 void EditorData::remove_scene(int p_idx) {
 	ERR_FAIL_INDEX(p_idx, edited_scene.size());
 	if (edited_scene[p_idx].root) {

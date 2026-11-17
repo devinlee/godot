@@ -15,6 +15,7 @@
 #include "editor/editor_undo_redo_manager.h"
 #include "core/object/undo_redo.h"
 #include "editor/editor_node.h"
+#include "editor/scene/editor_scene_tabs.h"
 #include "scene/3d/node_3d.h"
 #include "scene/3d/camera_3d.h"
 #include "scene/3d/mesh_instance_3d.h"
@@ -27,6 +28,7 @@
 #include "surface_runtime.h"
 #include <atomic>
 #include <charconv>
+#include <map>
 #include <mutex>
 
 #ifdef TOOLS_ENABLED
@@ -62,6 +64,11 @@ std::weak_ptr<SurfaceTransport> document_pipe;
 ObjectID document_root;
 uint64_t loaded_history_version = 0;
 uint64_t document_event_sequence = 0;
+struct NativeTab {
+	ObjectID root;
+	uint64_t history, sequence;
+};
+std::map<String, NativeTab> document_tabs;
 #endif
 
 /** 管道由 E01 创建并唯一继承。这里只还原句柄数值，类型及方向由传输层复核。 */
@@ -167,9 +174,10 @@ void bind_scene_viewport() {
 #ifdef TOOLS_ENABLED
 	if (launch->transport.max_document_bytes) {
 		auto *root = EditorInterface::get_singleton()->get_edited_scene_root();
-		auto *undo = EditorUndoRedoManager::get_singleton()->get_history_for_object(root).undo_redo;
+		auto *undo = EditorUndoRedoManager::get_singleton()->get_or_create_history(EditorNode::get_editor_data().get_current_edited_scene_history_id()).undo_redo;
 		document_root = root->get_instance_id();
 		loaded_history_version = undo->get_version();
+		document_tabs[launch->scene_path] = {document_root, loaded_history_version, document_event_sequence};
 	}
 #endif
 	print_verbose("Meton scene viewport: " + String::num_int64(viewport->get_visible_rect().size.x) + "x" +
@@ -203,8 +211,8 @@ static const char *current_document_root(Node *&root) {
 	root = editor ? editor->get_edited_scene_root() : nullptr;
 	const auto *launch = material_surface();
 	if (!launch || !root || !root->is_inside_tree() || root->get_instance_id() != document_root ||
-			root->get_scene_file_path() != launch->scene_path || EditorNode::get_singleton()->is_changing_scene()) return "recovery_required";
-	auto *undo = EditorUndoRedoManager::get_singleton()->get_history_for_object(root).undo_redo;
+			root->get_scene_file_path() != material_editor_scene_path() || EditorNode::get_singleton()->is_changing_scene()) return "recovery_required";
+	auto *undo = EditorUndoRedoManager::get_singleton()->get_or_create_history(EditorNode::get_editor_data().get_current_edited_scene_history_id()).undo_redo;
 	return undo->get_version() == loaded_history_version ? nullptr : "version_conflict";
 }
 static String scene_node_id(Node *root, Node *node, const String &document) {
@@ -436,7 +444,126 @@ static void publish_document_version(RID viewport, uint64_t version) {
 	auto *rs = RenderingServer::get_singleton();
 	if (!update_surface_source(rs->viewport_get_texture(viewport), version)) stop_surface();
 }
+/** 即使版本、尺寸和视口均相同，另一份文档也必须发布新的共享表面代次。 */
+static void publish_tab(RID viewport, uint64_t version, uint64_t epoch) {
+	const RID texture = viewport.is_valid() ? RenderingServer::get_singleton()->viewport_get_texture(viewport) : RID();
+	if (!update_surface_source(texture, version, epoch)) stop_surface();
+}
 #endif
+
+const char *open_document_tab(const String &path) {
+#ifdef TOOLS_ENABLED
+	auto *editor = EditorNode::get_singleton();
+	if (!editor || editor->is_changing_scene()) return "recovery_required";
+	auto &data = editor->get_editor_data();
+	if (data.get_edited_scene_from_path(path) < 0 && editor->load_scene(path) != OK) return "resource_missing";
+	const int index = data.get_edited_scene_from_path(path);
+	Node *root = index < 0 ? nullptr : data.get_edited_scene_root(index);
+	if (!root || root->get_scene_file_path() != path) return "recovery_required";
+	const auto found = document_tabs.find(path);
+	if (found != document_tabs.end()) {
+		return root->get_instance_id() == found->second.root ? nullptr : "recovery_required";
+	}
+	const auto *history = EditorUndoRedoManager::get_singleton()->get_or_create_history(data.get_scene_history_id(index)).undo_redo;
+	document_tabs[path] = {root->get_instance_id(), history->get_version(), 0};
+	return nullptr;
+#else
+	return "not_supported";
+#endif
+}
+
+const char *activate_document_tab(const String &path, const Size2i &requested_size, uint64_t version) {
+#ifdef TOOLS_ENABLED
+	if (const char *error = open_document_tab(path)) return error;
+	auto *editor = EditorNode::get_singleton();
+	auto *ui = EditorInterface::get_singleton();
+	auto &data = editor->get_editor_data();
+	const int index = data.get_edited_scene_from_path(path);
+	auto *root = data.get_edited_scene_root(index);
+	if (root->get_instance_id() == document_root && root == ui->get_edited_scene_root()) return nullptr;
+	const auto &tab = document_tabs.at(path);
+	auto *history = EditorUndoRedoManager::get_singleton()->get_or_create_history(data.get_scene_history_id(index)).undo_redo;
+	if (history->get_version() != tab.history) return "version_conflict";
+	const bool spatial = Object::cast_to<Node3D>(root) != nullptr;
+	auto *viewport = spatial ? ui->get_editor_viewport_3d() : ui->get_editor_viewport_2d();
+	if (!viewport || !viewport->is_inside_tree()) return "recovery_required";
+	auto *previous_viewport = Object::cast_to<Viewport>(ObjectDB::get_instance(bound_viewport));
+	const Size2i size = previous_viewport ? Size2i(previous_viewport->get_visible_rect().size) : requested_size;
+	if (document_root.is_valid()) {
+		Node *previous = nullptr;
+		if (const char *error = current_document_root(previous)) return error;
+		document_tabs[previous->get_scene_file_path()] = {document_root, loaded_history_version, document_event_sequence};
+	}
+	const uint64_t epoch = begin_document_input_epoch();
+	if (!epoch) return "budget_exceeded";
+	if (editor->open_scene(path) != OK || ui->get_edited_scene_root() != root || !root->is_inside_tree()) return "recovery_required";
+	ui->set_main_screen_editor(spatial ? "3D" : "2D");
+	if (auto *container = Object::cast_to<SubViewportContainer>(viewport->get_parent())) container->set_stretch(false);
+	viewport->set_size(size);
+	auto *rs = RenderingServer::get_singleton();
+	const RID rid = viewport->get_viewport_rid();
+	if (!spatial) rs->viewport_set_disable_2d(rid, false);
+	rs->viewport_set_update_mode(rid, RenderingServerEnums::VIEWPORT_UPDATE_ALWAYS);
+	document_root = tab.root; loaded_history_version = tab.history; document_event_sequence = tab.sequence;
+	bound_viewport = viewport->get_instance_id();
+	rs->call_on_render_thread(callable_mp_static(&publish_tab).bind(rid, version, epoch));
+	return nullptr;
+#else
+	return "not_supported";
+#endif
+}
+
+const char *close_document_tab(const String &path) {
+#ifdef TOOLS_ENABLED
+	auto found = document_tabs.find(path);
+	if (found == document_tabs.end()) return nullptr;
+	auto *editor = EditorNode::get_singleton();
+	auto &data = editor->get_editor_data();
+	const int index = data.get_edited_scene_from_path(path);
+	if (index < 0 || editor->is_changing_scene()) return "recovery_required";
+	Node *root = data.get_edited_scene_root(index);
+	if (!root || (root->get_instance_id() != found->second.root && root->get_instance_id() != document_root)) return "recovery_required";
+	if (index == data.get_edited_scene()) {
+		// 有其他已登记文档时，调用方先接续其真实视口。最后一份关闭时清空输入和捕获源。
+		const uint64_t epoch = begin_document_input_epoch();
+		if (!epoch || !editor->close_scene()) return "recovery_required";
+		document_root = ObjectID(); bound_viewport = ObjectID();
+		document_event_sequence = loaded_history_version = 0;
+		RenderingServer::get_singleton()->call_on_render_thread(callable_mp_static(&publish_tab).bind(RID(), uint64_t(0), epoch));
+	} else {
+		data.remove_scene(index);
+		EditorSceneTabs::get_singleton()->update_scene_tabs();
+	}
+	if (data.get_edited_scene_from_path(path) >= 0) return "recovery_required";
+	document_tabs.erase(found);
+	return nullptr;
+#else
+	return "not_supported";
+#endif
+}
+
+const char *inactive_document_selection(const String &path, const String &document, const String &after_event, Dictionary &projection) {
+#ifdef TOOLS_ENABLED
+	const auto found = document_tabs.find(path);
+	auto &data = EditorNode::get_singleton()->get_editor_data();
+	const int index = data.get_edited_scene_from_path(path);
+	if (found == document_tabs.end() || index < 0 || index == data.get_edited_scene()) return "scope_ended";
+	Node *root = data.get_edited_scene_root(index);
+	if (!root || root->get_instance_id() != found->second.root) return "recovery_required";
+	if (EditorUndoRedoManager::get_singleton()->get_or_create_history(data.get_scene_history_id(index)).undo_redo->get_version() != found->second.history) return "version_conflict";
+	const String current = String::num_uint64(found->second.sequence);
+	if (after_event.length() > current.length() || (after_event.length() == current.length() && after_event > current)) return "version_conflict";
+	Array selected;
+	for (Node *node : data.get_scene_selection(index)) {
+		if (!node || (node != root && !root->is_ancestor_of(node))) return "recovery_required";
+		selected.push_back(scene_node_id(root, node, document));
+	}
+	selected.sort(); projection["selected_node_ids"] = selected; projection["event_sequence"] = current;
+	return nullptr;
+#else
+	return "not_supported";
+#endif
+}
 
 const char *prepare_scene_transform(const String &source, const String &document, const Dictionary &change, SceneTransformEdit &edit, String &output, bool translation_only) {
 #ifdef TOOLS_ENABLED
@@ -538,10 +665,10 @@ const char *confirm_scene_history(const std::string &source, uint64_t version) {
 		if (node != previous && !previous->is_ancestor_of(node)) return "recovery_required";
 		selected.push_back(previous->get_path_to(node));
 	}
-	const auto &launch = *material_surface();
-	Node *next = MetonSceneHistoryLoader::instantiate(source,launch.scene_path);
+	const String scene_path = material_editor_scene_path();
+	Node *next = MetonSceneHistoryLoader::instantiate(source,scene_path);
 	if (!next) return "recovery_required";
-	next->set_scene_file_path(launch.scene_path);
+	next->set_scene_file_path(scene_path);
 	const Size2i size = viewport->get_visible_rect().size;
 	const bool spatial = Object::cast_to<Node3D>(next) != nullptr;
 	auto *target = spatial ? editor->get_editor_viewport_3d() : editor->get_editor_viewport_2d();
@@ -565,9 +692,10 @@ const char *confirm_scene_history(const std::string &source, uint64_t version) {
 		if (node && (node == next || node->get_owner() == next)) selection->add_node(node);
 	}
 	bound_viewport = target->get_instance_id(); document_root = next->get_instance_id();
-	loaded_history_version = EditorUndoRedoManager::get_singleton()->get_history_for_object(next).undo_redo->get_version();
+	loaded_history_version = EditorUndoRedoManager::get_singleton()->get_or_create_history(EditorNode::get_editor_data().get_current_edited_scene_history_id()).undo_redo->get_version();
 	previous->queue_free();
 	++document_event_sequence;
+	document_tabs[scene_path] = {document_root, loaded_history_version, document_event_sequence};
 	RenderingServer::get_singleton()->call_on_render_thread(callable_mp_static(&publish_document_version).bind(target->get_viewport_rid(),version));
 	return nullptr;
 #else

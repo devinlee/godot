@@ -1170,6 +1170,10 @@ Error Main::setup(const char *execpath, int argc, char *argv[], bool p_second_ph
 		ERR_PRINT("METON_MATERIAL_ADMISSION_REJECTED");
 		goto error;
 	}
+	if (meton::bridge::checking_materials_only()) {
+		exit_err = ERR_HELP; // 复用平台的成功早退路径，此时尚未读取项目配置。
+		goto error;
+	}
 	if (meton::bridge::materials_active()) packed_data->set_disabled(true);
 	if (meton::bridge::preparing_material_textures()) args.erase("--meton-prepare-png");
 #endif

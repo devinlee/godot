@@ -29,6 +29,10 @@
 /**************************************************************************/
 
 #include "resource_format_text.h"
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_METON_ENGINE_ENABLED
+#include "modules/meton_engine/material_admission.h"
+#endif
 
 #include "core/config/project_settings.h"
 #include "core/io/dir_access.h"
@@ -488,6 +492,14 @@ Error ResourceLoaderText::load() {
 		String type = next_tag.fields["type"];
 		String id = next_tag.fields["id"];
 
+#ifdef MODULE_METON_ENGINE_ENABLED
+		String scoped_path;
+		const Variant *sealed_uid = next_tag.fields.getptr("uid");
+		if (meton::bridge::material_external_resource(res_path, path, type, sealed_uid ? String(*sealed_uid) : String(), scoped_path)) {
+			ERR_FAIL_COND_V_MSG(scoped_path.is_empty(), ERR_FILE_CORRUPT, "METON_DOCUMENT_REFERENCE_REJECTED");
+			path = scoped_path;
+		} else
+#endif
 		if (next_tag.fields.has("uid")) {
 			String uidt = next_tag.fields["uid"];
 			ResourceUID::ID uid = ResourceUID::get_singleton()->text_to_id(uidt);

@@ -9,5 +9,7 @@ def configure(env):
 def get_opts(platform):
     from SCons.Variables import BoolVariable
     return [("meton_contracts_dir", "Meton G01 generated C++ contracts (required)", ""),
+            BoolVariable("meton_content_tool", "Build the task-only headless Meton ContentTool", False),
+            ("meton_import_tool_sha256", "Optional pinned ContentTool binary digest for this consumer", ""),
             BoolVariable("meton_surface_fixture", "Build the trusted native surface fixture (tests only)", False),
             ("meton_fixture_config_dir", "Pinned surface fixture configuration directory", "")]

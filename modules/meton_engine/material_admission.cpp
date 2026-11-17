@@ -21,8 +21,10 @@
 #include <cmath>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <set>
+#include <shared_mutex>
 #include <string>
 #include <vector>
 
@@ -55,24 +57,38 @@ struct OpenGesture {
 	Point2 end;
 	bool lifted = false;
 };
-struct State {
-	std::wstring root;
-	std::vector<std::unique_ptr<Pin>> pins;
+using Pins = std::vector<std::unique_ptr<Pin>>;
+struct DocumentMaterial {
+	Pins pins;
 	std::set<std::string> allowed;
+	std::map<std::string, std::string> types;
 	std::map<std::string, std::string> uids;
+	std::map<std::string, std::vector<std::string>> references;
 	TextureSources textures;
 	std::map<std::string, std::string> texture_remaps;
+	std::string key, seal_digest, main_scene, scene_bytes;
+	String resource_root = "res://";
+	Dictionary source, checkpoint, last_route, last_receipt;
+	Size2i viewport_size;
+};
+struct State {
+	std::wstring root;
+	DocumentMaterial startup;
+	DocumentMaterial *current = &startup;
+	bool startup_open = true;
+	std::map<std::string, std::shared_ptr<DocumentMaterial>> documents;
+	std::shared_mutex documents_mutex;
 	std::string producer_json;
 	bool prepare_textures = false;
+	bool check_only = false;
 	bool active = false;
 	std::optional<SceneSurfaceLaunch> surface;
 	std::string hello_digest, project, generation, purpose, session, instance;
-	Dictionary build, policy, checkpoint;
-	std::string scene_bytes;
+	Dictionary build, policy;
 	Array capabilities;
 	std::optional<PreparedEdit> pending;
 	std::optional<OpenGesture> gesture;
-	Dictionary last_route, last_receipt, preview_binding;
+	Dictionary preview_binding;
 	bool query_enabled = false;
 };
 std::unique_ptr<State> state;
@@ -191,16 +207,16 @@ std::string encode_hex(const uint8_t *data, size_t count) {
 	return value;
 }
 /** 父目录由 E01 持有；子端再拒绝重解析点并持有加载期间的不可替换对象。 */
-bool pin_directory(const std::wstring &name, bool root = false) {
+bool pin_directory(Pins &pins, const std::wstring &name, bool root = false) {
 	auto pin = std::make_unique<Pin>(CreateFileW(name.c_str(), FILE_READ_ATTRIBUTES | FILE_LIST_DIRECTORY,
 			FILE_SHARE_READ | FILE_SHARE_WRITE | (root ? FILE_SHARE_DELETE : 0), nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
 	FILE_ATTRIBUTE_TAG_INFO attr{};
 	if (!check(pin->value != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(pin->value, FileAttributeTagInfo, &attr, sizeof(attr)) &&
 			(attr.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) && !(attr.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT), "directory_identity")) return false;
-	state->pins.push_back(std::move(pin)); return true;
+	pins.push_back(std::move(pin)); return true;
 }
 /** 不经 Godot 的路径重映射或 Variant/Object 解析器读取原始材料。 */
-bool read_file(const std::wstring &name, uint64_t maximum, File &result, bool keep_bytes) {
+bool read_file(Pins &pins, const std::wstring &name, uint64_t maximum, File &result, bool keep_bytes) {
 	auto pin = std::make_unique<Pin>(CreateFileW(name.c_str(), GENERIC_READ, FILE_SHARE_READ, nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, nullptr));
 	FILE_ATTRIBUTE_TAG_INFO attr{}; FILE_STANDARD_INFO info{}; FILE_ID_INFO identity{};
 	if (!check(pin->value != INVALID_HANDLE_VALUE && GetFileInformationByHandleEx(pin->value, FileAttributeTagInfo, &attr, sizeof(attr)) &&
@@ -219,7 +235,7 @@ bool read_file(const std::wstring &name, uint64_t maximum, File &result, bool ke
 	}
 	uint8_t digest[32];
 	if (!check(total == result.size && hash.finish(digest) == OK, "file_size")) return false;
-	result.digest = encode_hex(digest, 32); state->pins.push_back(std::move(pin)); return true;
+	result.digest = encode_hex(digest, 32); pins.push_back(std::move(pin)); return true;
 }
 bool json(const File &file, Variant &value) {
 	String decoded; if (!check(decoded.append_utf8(file.bytes.data(), file.bytes.size()) == OK, "metadata_utf8")) return false;
@@ -227,7 +243,7 @@ bool json(const File &file, Variant &value) {
 	value = parser.get_data(); return true;
 }
 /** 保存状态和历史来自原文档所有者。资源对照包括同摘要多文件的个数。 */
-bool admitted_checkpoint(const Variant &value, const Dictionary &source, const std::string &main,
+bool admitted_checkpoint(DocumentMaterial &doc, const std::wstring &content, const Variant &value, const Dictionary &source, const std::string &main,
 		const std::map<std::string, File> &actual, const Array &admitted) {
 	if (!shape(value, {"checkpoint_id","digest","document_id","version","saved_version","history_cursor","history","resources","size_bytes"})) return false;
 	const Dictionary cp = value;
@@ -262,23 +278,23 @@ bool admitted_checkpoint(const Variant &value, const Dictionary &source, const s
 	}
 	if (!remaining.empty()) return false;
 	if (field(source,"purpose") == "preview") {
-		state->checkpoint = cp;
+		doc.checkpoint = cp;
 		return true;
 	}
 	// 原文件已被固定。只保留主场景，资源继续由原检查点和不可变文件持有。
 	File body;
-	if (!read_file(joined(state->root + L"\\content", main), 1048576, body, true) ||
+	if (!read_file(doc.pins, joined(content, main), 1048576, body, true) ||
 			body.digest != file->second.digest || body.id != file->second.id || body.volume != file->second.volume) return false;
-	state->scene_bytes = std::move(body.bytes);
-	state->checkpoint = cp; return true;
+	doc.scene_bytes = std::move(body.bytes);
+	doc.checkpoint = cp; return true;
 }
 bool identity(const Variant &value) {
 	if (!shape(value, {"volume_serial", "file_id"})) return false;
 	Dictionary dict = value; return decimal(field(dict, "volume_serial")) && hex(field(dict, "file_id"), 32);
 }
 /** 严格闭包连目录项一起核对，未登记的配置、脚本、导入缓存和空目录都不能混入。 */
-bool inventory(const std::wstring &directory, const std::string &prefix, const std::set<std::string> &expected) {
-	if (!pin_directory(directory)) return false;
+bool inventory(Pins &pins, const std::wstring &directory, const std::string &prefix, const std::set<std::string> &expected, bool launch) {
+	if (!pin_directory(pins, directory)) return false;
 	WIN32_FIND_DATAW item{}; HANDLE search = FindFirstFileW((directory + L"\\*").c_str(), &item);
 	if (search == INVALID_HANDLE_VALUE) return check(false, "inventory_open");
 	bool ok = true;
@@ -288,8 +304,8 @@ bool inventory(const std::wstring &directory, const std::string &prefix, const s
 		if (!path(relative) || (item.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) { ok = false; break; }
 		if (item.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
 			auto start = expected.lower_bound(relative + "/");
-			if (((start == expected.end() || start->rfind(relative + "/", 0) != 0) && !cache_directories.count(relative)) ||
-					!inventory(directory + L"\\" + name, relative + "/", expected)) { ok = false; break; }
+			if (((start == expected.end() || start->rfind(relative + "/", 0) != 0) && !(launch && cache_directories.count(relative))) ||
+					!inventory(pins, directory + L"\\" + name, relative + "/", expected, launch)) { ok = false; break; }
 		} else if (!expected.count(relative)) { ok = false; break; }
 	} while (FindNextFileW(search, &item));
 	DWORD last = GetLastError(); FindClose(search);
@@ -307,11 +323,11 @@ bool canonical_uid(const std::string &uid) {
 	return true;
 }
 /** 与锁定版 ResourceUID::encode_binary_cache 同一格式，不调用未受限的缓存解析器。 */
-std::string canonical_uid_cache() {
+std::string canonical_uid_cache(const DocumentMaterial &doc) {
 	std::string result;
 	auto append = [&](uint64_t value, int count) { for (int i = 0; i < count; ++i) { result.push_back(static_cast<char>(value & 255)); value >>= 8; } };
-	append(state->uids.size(), 4);
-	for (const auto &entry : state->uids) {
+	append(doc.uids.size(), 4);
+	for (const auto &entry : doc.uids) {
 		uint64_t value = 0;
 		for (char c : entry.first.substr(6)) value = value * 34 + (c >= 'a' && c <= 'y' ? c - 'a' : c - '0' + 25);
 		const auto resource = "res://" + entry.second;
@@ -326,6 +342,9 @@ bool arguments(const List<String> &args, const std::string &purpose) {
 		if (key == "--headless" || key == "--no-header" || key == "--verbose" || key == "--quit") continue;
 		if (key == "--editor") { editor = true; continue; }
 		if (key == "--meton-prepare-png" && purpose == "editor") { state->prepare_textures = true; continue; }
+#ifdef METON_CONTENT_TOOL_ENABLED
+		if (key == "--meton-check-materials") { state->check_only = true; continue; }
+#endif
 		if (key != "--path" && key != "--log-file" && key != "--quit-after" && key != "--rendering-driver" && key != "--rendering-method" && key != "--audio-driver")
 			return check(false, "arguments_forbidden");
 		item = item->next(); if (!item) return check(false, "arguments_value");
@@ -336,12 +355,16 @@ bool arguments(const List<String> &args, const std::string &purpose) {
 		if ((key == "--rendering-driver" && value != "d3d12") || (key == "--rendering-method" && value != "forward_plus") ||
 				(key == "--audio-driver" && value != "Dummy")) return check(false, "arguments_driver");
 	}
+#ifdef METON_CONTENT_TOOL_ENABLED
+	// 内容工具只能在已封印的无窗口代次执行一项工作，不能进入编辑会话或试播主循环。
+	if (!check(purpose == "editor" && used.count("--headless") && state->prepare_textures != state->check_only, "content_tool_task")) return false;
+#endif
 	return check(project && editor == (purpose == "editor"), "arguments_purpose");
 }
 /** 诊断只写本代固定日志根；不回传原场景正文、原路径或进程能力。 */
 void report(bool accepted, const std::string &control) {
 	std::string data = "{\"format_version\":1,\"accepted\":" + std::string(accepted ? "true" : "false") +
-			",\"reason\":\"" + (accepted ? "admitted" : failure) + "\",\"files\":" + std::to_string(state->allowed.size()) +
+			",\"reason\":\"" + (accepted ? "admitted" : failure) + "\",\"files\":" + std::to_string(state->startup.allowed.size()) +
 			(control.empty() ? "" : ",\"control\":\"" + control + "\"") + "}";
 	Pin file(CreateFileW((state->root + L"\\logs\\admission.json").c_str(), GENERIC_WRITE, FILE_SHARE_READ, nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr));
 	if (file.value != INVALID_HANDLE_VALUE) { DWORD written = 0; WriteFile(file.value, data.data(), data.size(), &written, nullptr); FlushFileBuffers(file.value); }
@@ -358,14 +381,14 @@ bool png_header(const File &file) {
 	return dimension(16) && dimension(20);
 }
 /** 消费者只接受来自已固定生产者的回执。逐源比对独立摘要并重建 sidecar 后，才登记内部重映射。 */
-bool verify_textures(const Dictionary &seal, const Dictionary &source, const std::map<std::string, File> &actual,
+bool verify_textures(DocumentMaterial &doc, bool preparing, const Dictionary &seal, const Dictionary &source, const std::map<std::string, File> &actual,
 		const std::map<std::string, std::vector<std::string>> &derived) {
-	if (state->textures.empty() || state->prepare_textures) {
-		return check(derived.empty() && !seal.has("import_receipt_digest") && (!state->prepare_textures || !state->textures.empty()), "import_phase");
+	if (doc.textures.empty() || preparing) {
+		return check(derived.empty() && !seal.has("import_receipt_digest") && (!preparing || !doc.textures.empty()), "import_phase");
 	}
 	auto receipt_file = actual.find("meton-imports.json");
 	if (!check(derived.count("meton-imports.json") && receipt_file != actual.end() && receipt_file->second.digest == field(seal, "import_receipt_digest") &&
-			derived.size() == 1 + 2 * state->textures.size(), "import_receipt")) return false;
+			derived.size() == 1 + 2 * doc.textures.size(), "import_receipt")) return false;
 	Variant parsed;
 	if (!json(receipt_file->second, parsed) || !check(shape(parsed, {"format_version","recipe","producer","files"}), "import_receipt_shape")) return false;
 	Dictionary receipt = parsed;
@@ -377,15 +400,26 @@ bool verify_textures(const Dictionary &seal, const Dictionary &source, const std
 	Dictionary from = producer["build"], consuming = source["build"];
 	for (const char *key : {"source_sha","host_digest","policy_digest","protocol_version","platform","graphics"}) if (!check(field(from, key) == field(consuming, key), "import_producer")) return false;
 	if (!check(hex(field(from,"engine_digest"), 64) && id(field(from,"build_id")), "import_producer")) return false;
-	if (field(source,"purpose") == "editor" && !check(field(from,"engine_digest") == field(consuming,"engine_digest") && field(from,"build_id") == field(consuming,"build_id"), "import_producer")) return false;
+	if (field(source,"purpose") == "editor") {
+		bool paired = field(from,"engine_digest") == field(consuming,"engine_digest") && field(from,"build_id") == field(consuming,"build_id");
+#ifdef METON_IMPORT_TOOL_SHA256
+#define METON_TOOL_STR_INNER(value) #value
+#define METON_TOOL_STR(value) METON_TOOL_STR_INNER(value)
+		// 独立工具的原代回执摘要已由宿主固定，只允许编译进本消费组合的确切生产者。
+		paired = paired || field(from,"engine_digest") == METON_TOOL_STR(METON_IMPORT_TOOL_SHA256);
+#undef METON_TOOL_STR
+#undef METON_TOOL_STR_INNER
+#endif
+		if (!check(paired, "import_producer")) return false;
+	}
 	Array files = receipt["files"];
-	if (!check(size_t(files.size()) == state->textures.size(), "import_count")) return false;
+	if (!check(size_t(files.size()) == doc.textures.size(), "import_count")) return false;
 	for (int i = 0; i < files.size(); ++i) {
 		if (!check(shape(files[i], {"path","source_digest","digest","size_bytes"}), "import_file")) return false;
 		Dictionary fact = files[i];
 		const auto path_name = field(fact,"path");
-		const auto src = state->textures.find(path_name);
-		if (!check(src != state->textures.end() && field(fact,"source_digest") == src->second.digest, "import_source")) return false;
+		const auto src = doc.textures.find(path_name);
+		if (!check(src != doc.textures.end() && field(fact,"source_digest") == src->second.digest, "import_source")) return false;
 		const auto cache = texture_cache_path(path_name), sidecar = path_name + ".import";
 		const auto blob = actual.find(cache), side = actual.find(sidecar);
 		uint64_t size;
@@ -393,35 +427,16 @@ bool verify_textures(const Dictionary &seal, const Dictionary &source, const std
 				blob != actual.end() && side != actual.end() && blob->second.digest == field(fact,"digest") &&
 				integer(fact["size_bytes"], material_budget, size) && size > 0 && blob->second.size == size && blob->second.prefix.substr(0,4) == "GST2", "import_cache")) return false;
 		if (!check(side->second.bytes == texture_sidecar(path_name, src->second, cache), "import_sidecar")) return false;
-		if (!check(state->texture_remaps.emplace(path_name, cache).second, "import_duplicate")) return false;
+		if (!check(doc.texture_remaps.emplace(path_name, cache).second, "import_duplicate")) return false;
 	}
 	return true;
 }
-bool verify(const List<String> &args, const std::string &seal_digest) {
-	if (!check(hex(seal_digest, 64), "seal_missing")) return false;
-	File seal_file; if (!read_file(state->root + L"\\execution-seal.json", 1048576, seal_file, true)) return false;
-	if (!check(seal_file.digest == seal_digest, "seal_digest")) return false;
-	Variant seal_value; if (!json(seal_file, seal_value)) return false;
-	if (!check(shape(seal_value, {"format_version", "instance_generation", "purpose", "host_digest", "engine_digest", "policy_digest", "protocol_digest", "admission_digest", "files"}, {"import_receipt_digest", "surface", "control"}), "seal_shape")) return false;
-	Dictionary seal = seal_value;
-	std::string purpose = field(seal, "purpose"), generation = field(seal, "instance_generation");
-	if (!check(version(seal) && decimal(generation) && generation != "0" && (purpose == "editor" || purpose == "preview") &&
-			hex(field(seal, "host_digest"), 64) && hex(field(seal, "engine_digest"), 64) && hex(field(seal, "policy_digest"), 64) &&
-			hex(field(seal, "admission_digest"), 64) && field(seal, "protocol_digest") == meton::engine::contract::schema_digest, "seal_context")) return false;
-	// 用途必须绑定当前编译配置，不能拿编辑器 EXE 冒充受限试播，或反向混用。
-#ifdef TOOLS_ENABLED
-	if (!check(purpose == "editor", "seal_profile")) return false;
-#else
-	if (!check(purpose == "preview", "seal_profile")) return false;
-#endif
-	if (!arguments(args, purpose)) return false;
-	auto executable = wide(OS::get_singleton()->get_executable_path().replace("/", "\\"));
-	if (!check(executable.rfind(state->root + L"\\runtime\\", 0) == 0, "engine_location") || !pin_directory(state->root + L"\\runtime")) return false;
-	File engine; if (!read_file(executable, 1073741824, engine, false) || !check(engine.digest == field(seal, "engine_digest"), "engine_digest")) return false;
+/** 启动原稿和后续文档使用同一份文件、依赖、导入和检查点核验。句柄归当前文档持有。 */
+bool verify_content(DocumentMaterial &doc, const std::wstring &content, const Dictionary &seal, const std::string &purpose, bool preparing, bool launch) {
 	if (!check(seal["files"].get_type() == Variant::ARRAY, "seal_files")) return false;
 	Array files = seal["files"]; if (!check(files.size() >= 3 && files.size() <= 256, "seal_files")) return false;
 	std::map<std::string, File> actual; std::set<std::string> names, folded, identities; uint64_t total = 0;
-	if (!pin_directory(state->root + L"\\content")) return false;
+	if (!pin_directory(doc.pins, content)) return false;
 	for (int i = 0; i < files.size(); ++i) {
 		if (!check(shape(files[i], {"path", "digest", "size_bytes", "identity"}), "seal_file_shape")) return false;
 		Dictionary entry = files[i]; std::string name = field(entry, "path"); uint64_t size;
@@ -429,24 +444,24 @@ bool verify(const List<String> &args, const std::string &seal_digest) {
 				identity(entry["identity"]) && folded.insert(lower(name)).second, "seal_file_fields")) return false;
 		// 先固定所有中间目录，文件打开时不经过尚未核对的重解析点。
 		size_t at = 0; while ((at = name.find('/', at)) != std::string::npos) {
-			if (!pin_directory(joined(state->root + L"\\content", name.substr(0, at++)))) return false;
+			if (!pin_directory(doc.pins, joined(content, name.substr(0, at++)))) return false;
 		}
 		File file; bool keep = name == "meton-admission.json" || name == "project.godot" || cache_indexes.count(name) || name == uid_cache || name == "meton-imports.json" || suffix(name, ".import");
 		if (keep && !check(size <= 1048576, "metadata_budget")) return false;
-		if (!read_file(joined(state->root + L"\\content", name), material_budget - total, file, keep)) return false;
+		if (!read_file(doc.pins, joined(content, name), material_budget - total, file, keep)) return false;
 		Dictionary stamp = entry["identity"];
 		if (!check(file.size == size && file.digest == field(entry, "digest") && file.volume == field(stamp, "volume_serial") && file.id == field(stamp, "file_id") &&
 				identities.insert(file.volume + ":" + file.id).second, "copied_file_mismatch")) return false;
 		total += size; actual.emplace(name, std::move(file)); names.insert(name);
 	}
-	if (!inventory(state->root + L"\\content", "", names)) return false;
-	for (const auto &directory : cache_directories) if (!pin_directory(joined(state->root + L"\\content", directory))) return false;
+	if (!inventory(doc.pins, content, "", names, launch)) return false;
+	if (launch) for (const auto &directory : cache_directories) if (!pin_directory(doc.pins, joined(content, directory))) return false;
 	auto admission_file = actual.find("meton-admission.json");
 	if (!check(admission_file != actual.end() && admission_file->second.digest == field(seal, "admission_digest"), "admission_digest")) return false;
 	Variant manifest_value; if (!json(admission_file->second, manifest_value)) return false;
 	if (!check(shape(manifest_value, {"format_version", "profile", "source", "main_scene", "viewport", "files"}, {"phase","checkpoint"}), "admission_shape")) return false;
 	Dictionary manifest = manifest_value;
-	if (!check(manifest.has("phase") == state->prepare_textures && (!state->prepare_textures || field(manifest, "phase") == "prepare_png"), "import_phase")) return false;
+	if (!check(manifest.has("phase") == preparing && (!preparing || field(manifest, "phase") == "prepare_png"), "import_phase")) return false;
 	if (!check(version(manifest) && field(manifest, "profile") == "gw1-pure-data-v1" &&
 			shape(manifest["source"], {"project_id", "document_id", "source_version", "purpose", "build"}) &&
 			shape(manifest["viewport"], {"width", "height"}) && manifest["files"].get_type() == Variant::ARRAY, "admission_fields")) return false;
@@ -454,6 +469,7 @@ bool verify(const List<String> &args, const std::string &seal_digest) {
 	if (!check(id(field(source, "project_id")) && id(field(source, "document_id")) && decimal(field(source, "source_version")) && field(source, "purpose") == purpose &&
 			shape(source["build"], {"source_sha", "build_id", "engine_digest", "host_digest", "policy_digest", "protocol_version", "platform", "graphics"}), "admission_source")) return false;
 	Dictionary build = source["build"];
+	if (!launch && !check(field(source, "project_id") == state->project && state->build.recursive_equal(build, 0) && manifest.has("checkpoint"), "document_source")) return false;
 	if (!check(field(build, "source_sha") == GODOT_VERSION_HASH && id(field(build, "build_id")) &&
 			field(build, "engine_digest") == field(seal, "engine_digest") && field(build, "host_digest") == field(seal, "host_digest") &&
 			field(build, "policy_digest") == field(seal, "policy_digest") && field(build, "protocol_version") == "0.1.0" &&
@@ -475,11 +491,11 @@ bool verify(const List<String> &args, const std::string &seal_digest) {
 				!dependencies.count(name), "admitted_file_mismatch")) return false;
 		if (kind == "scene") { if (!check(name.rfind(".godot/", 0) != 0 && suffix(name, ".tscn") && type == "PackedScene", "admitted_type")) return false; if (name == main_scene) main = true; }
 		else if (kind == "resource") {
-			const std::set<std::string> types{"BoxMesh", "PlaneMesh", "QuadMesh", "SphereMesh", "StandardMaterial3D", "Environment"};
+			const std::set<std::string> types{"BoxMesh", "PlaneMesh", "QuadMesh", "SphereMesh", "StandardMaterial3D", "Environment", "Curve", "CurveTexture"};
 			if (!check(name.rfind(".godot/", 0) != 0 && suffix(name, ".tres") && types.count(type), "admitted_type")) return false;
 		} else if (kind == "png") {
 			if (!check(suffix(name, ".png") && name.size() <= 233 && type == "Texture2D" && png_header(found->second), "admitted_png")) return false;
-			state->textures.emplace(name, TextureSource{found->second.digest, field(entry, "uid")});
+			doc.textures.emplace(name, TextureSource{found->second.digest, field(entry, "uid")});
 		} else if (kind == "project") {
 			if (!check(name == "project.godot" && type == "ProjectSettings" && !entry.has("identity") && !entry.has("uid"), "admitted_project")) return false;
 			project = true;
@@ -502,7 +518,7 @@ bool verify(const List<String> &args, const std::string &seal_digest) {
 		}
 		if (entry.has("uid")) {
 			auto uid = field(entry, "uid");
-			if (!check(canonical_uid(uid) && state->uids.emplace(uid, name).second, "admitted_uid")) return false;
+			if (!check(canonical_uid(uid) && doc.uids.emplace(uid, name).second, "admitted_uid")) return false;
 		}
 		Array refs = entry["dependencies"]; if (!check(refs.size() <= 256 && (kind != "cache_index" || refs.is_empty()), "admitted_dependencies")) return false;
 		if (!check((kind != "png" && kind != "import_receipt" && kind != "import_cache") || refs.is_empty(), "admitted_dependencies")) return false;
@@ -517,13 +533,16 @@ bool verify(const List<String> &args, const std::string &seal_digest) {
 		}
 		if (derived.count(name)) derived[name] = edges;
 		dependencies.emplace(name, std::move(edges));
-		if (kind == "scene" || kind == "resource" || kind == "png") state->allowed.insert(name);
+		if (kind == "scene" || kind == "resource" || kind == "png") {
+			doc.allowed.insert(name);
+			doc.types.emplace(name, type);
+		}
 	}
 	if (!check(main && project && dependencies["project.godot"] == std::vector<std::string>{main_scene}, "admitted_entry")) return false;
-	if (!verify_textures(seal, source, actual, derived)) return false;
-	if (state->prepare_textures) state->producer_json = bytes(JSON::stringify(source));
-	std::vector<std::string> uid_paths; for (const auto &entry : state->uids) uid_paths.push_back(entry.second);
-	if (!check(metadata.size() == cache_indexes.size() + 1 && metadata.count(uid_cache) && actual[uid_cache].bytes == canonical_uid_cache() &&
+	if (!verify_textures(doc, preparing, seal, source, actual, derived)) return false;
+	if (preparing) state->producer_json = bytes(JSON::stringify(source));
+	std::vector<std::string> uid_paths; for (const auto &entry : doc.uids) uid_paths.push_back(entry.second);
+	if (!check(metadata.size() == cache_indexes.size() + 1 && metadata.count(uid_cache) && actual[uid_cache].bytes == canonical_uid_cache(doc) &&
 			dependencies[uid_cache] == uid_paths, "uid_cache")) return false;
 	std::set<std::string> reached; std::vector<std::string> pending{"project.godot"};
 	for (const auto &name : metadata) pending.push_back(name);
@@ -544,13 +563,48 @@ bool verify(const List<String> &args, const std::string &seal_digest) {
 			"\"\n\n[display]\nwindow/size/viewport_width=" + std::to_string(width) + "\nwindow/size/viewport_height=" + std::to_string(height) +
 			"\n\n[rendering]\nrenderer/rendering_method=\"forward_plus\"\n";
 	if (!check(actual["project.godot"].bytes == config, "project_configuration")) return false;
-	if (manifest.has("checkpoint") && !check(!state->prepare_textures && seal.has("control") &&
-			admitted_checkpoint(manifest["checkpoint"], source, main_scene, actual, admitted), "document_checkpoint")) return false;
+	if (manifest.has("checkpoint") && !check(!preparing && (!launch || seal.has("control")) &&
+			admitted_checkpoint(doc, content, manifest["checkpoint"], source, main_scene, actual, admitted), "document_checkpoint")) return false;
+	doc.source = source;
+	doc.main_scene = main_scene;
+	doc.viewport_size = Size2i(width, height);
+	doc.references = std::move(dependencies);
+	return true;
+}
+bool verify(const List<String> &args, const std::string &seal_digest) {
+	if (!check(hex(seal_digest, 64), "seal_missing")) return false;
+	File seal_file; if (!read_file(state->startup.pins, state->root + L"\\execution-seal.json", 1048576, seal_file, true)) return false;
+	if (!check(seal_file.digest == seal_digest, "seal_digest")) return false;
+	Variant seal_value; if (!json(seal_file, seal_value)) return false;
+	if (!check(shape(seal_value, {"format_version", "instance_generation", "purpose", "host_digest", "engine_digest", "policy_digest", "protocol_digest", "admission_digest", "files"}, {"import_receipt_digest", "surface", "control", "document_key"}), "seal_shape")) return false;
+	Dictionary seal = seal_value;
+	std::string purpose = field(seal, "purpose"), generation = field(seal, "instance_generation");
+	if (!check(version(seal) && decimal(generation) && generation != "0" && (purpose == "editor" || purpose == "preview") &&
+			hex(field(seal, "host_digest"), 64) && hex(field(seal, "engine_digest"), 64) && hex(field(seal, "policy_digest"), 64) &&
+			hex(field(seal, "admission_digest"), 64) && field(seal, "protocol_digest") == meton::engine::contract::schema_digest, "seal_context")) return false;
+	// 用途必须绑定当前编译配置，不能拿编辑器 EXE 冒充受限试播，或反向混用。
+#ifdef TOOLS_ENABLED
+	if (!check(purpose == "editor", "seal_profile")) return false;
+#else
+	if (!check(purpose == "preview", "seal_profile")) return false;
+#endif
+	if (!arguments(args, purpose)) return false;
+	auto executable = wide(OS::get_singleton()->get_executable_path().replace("/", "\\"));
+	if (!check(executable.rfind(state->root + L"\\runtime\\", 0) == 0, "engine_location") || !pin_directory(state->startup.pins, state->root + L"\\runtime")) return false;
+	File engine; if (!read_file(state->startup.pins, executable, 1073741824, engine, false) || !check(engine.digest == field(seal, "engine_digest"), "engine_digest")) return false;
+	if (!verify_content(state->startup, state->root + L"\\content", seal, purpose, state->prepare_textures, true)) return false;
+	auto &doc = state->startup;
+	const Dictionary &source = doc.source;
+	doc.seal_digest = seal_digest;
+	if (seal.has("document_key")) {
+		doc.key = field(seal, "document_key");
+		if (!check(hex(doc.key, 64) && purpose == "editor" && seal.has("control") && !doc.checkpoint.is_empty(), "document_binding")) return false;
+	}
 	if (seal.has("surface") && !check(!state->prepare_textures && !args.find("--headless") &&
 			read_surface(seal["surface"], generation, field(source, "source_version")), "surface_launch_binding")) return false;
 	if (state->surface) {
-		state->surface->scene_path = text("res://" + main_scene);
-		state->surface->viewport_size = Size2i(width, height);
+		state->surface->scene_path = text("res://" + doc.main_scene);
+		state->surface->viewport_size = doc.viewport_size;
 	}
 	if (seal.has("control")) {
 		if (!check(state->surface.has_value() && shape(seal["control"], {"request_digest", "policy"}), "scene_control_seal")) return false;
@@ -558,14 +612,14 @@ bool verify(const List<String> &args, const std::string &seal_digest) {
 		state->hello_digest = field(control, "request_digest");
 		if (!check(hex(state->hello_digest, 64) && control["policy"].get_type() == Variant::DICTIONARY, "scene_control_policy")) return false;
 		state->policy = control["policy"];
-		if (!state->checkpoint.is_empty()) {
+		if (!state->current->checkpoint.is_empty()) {
 			uint64_t maximum = 0, inflight = 0;
 			if (!check(integer(state->policy.get("max_message_bytes", Variant()),1048576,maximum) && maximum &&
 					integer(state->policy.get("max_inflight_requests",Variant()),64,inflight) && inflight,"document_budget")) return false;
 			state->surface->transport.max_document_bytes = static_cast<uint32_t>(maximum);
 			state->surface->transport.max_document_requests = static_cast<uint32_t>(inflight);
 		}
-		state->build = build; state->generation = generation; state->purpose = purpose; state->project = field(source, "project_id");
+		state->build = source["build"]; state->generation = generation; state->purpose = purpose; state->project = field(source, "project_id");
 		state->surface->transport.allow_scene_hello = true;
 	}
 	return true;
@@ -598,7 +652,7 @@ bool write_permit(const Dictionary &route, const Dictionary &permit) {
 	const Dictionary binding = route["binding"];
 	if (!shape(permit,{"permit_id","project_id","document_id","view_id","lease_id","document_version","instance_generation","lease_generation","expires_at"}) ||
 			!id(field(permit,"permit_id")) || field(permit,"document_id") != field(route,"document_id") || field(permit,"view_id") != field(route,"view_id") ||
-			field(permit,"document_version") != field(state->checkpoint,"version") || !future_utc(field(permit,"expires_at")) ||
+			field(permit,"document_version") != field(state->current->checkpoint,"version") || !future_utc(field(permit,"expires_at")) ||
 			field(permit,"expires_at") > field(binding,"lease_expires_at")) return false;
 	for (const char *key : {"project_id","lease_id","lease_generation","instance_generation"}) if (field(permit,key) != field(binding,key)) return false;
 	return true;
@@ -626,7 +680,7 @@ const char *gesture_input(const Dictionary &route, const Dictionary &view, const
 		}
 		return nullptr;
 	}
-	if (field(packet,"intent") != "edit" || field(view,"document_version") != field(state->checkpoint,"version") || !packet.has("permit") || packet["permit"].get_type() != Variant::DICTIONARY ||
+	if (field(packet,"intent") != "edit" || field(view,"document_version") != field(state->current->checkpoint,"version") || !packet.has("permit") || packet["permit"].get_type() != Variant::DICTIONARY ||
 			!write_permit(route,packet["permit"]) || !future_utc(field(packet["permit"],"expires_at"),state->surface->capture.operation_timeout_ms)) return "permission_denied";
 	uint64_t pointer, x, y, buttons;
 	if (!shape(input,{"kind","phase","pointer_id","x","y","buttons","modifiers"}) || field(input,"kind") != "pointer" ||
@@ -666,11 +720,11 @@ bool pending_for(const Dictionary &route, const Dictionary &op) {
 void remember_uncommitted(const Dictionary &route, const Dictionary &command, const char *status, const char *error) {
 	Dictionary receipt;
 	for (const char *key : {"operation_id","params_digest","document_id"}) receipt[key] = command[key];
-	for (const char *key : {"version","saved_version","checkpoint_id"}) receipt[key] = state->checkpoint[key];
+	for (const char *key : {"version","saved_version","checkpoint_id"}) receipt[key] = state->current->checkpoint[key];
 	receipt["status"] = status; receipt["commit_state"] = "not_committed";
 	receipt["receipt_id"] = "receipt:" + (String(command["operation_id"]) + "\n" + String(command["params_digest"])).sha256_text();
 	if (error) { Dictionary detail; detail["code"] = error; receipt["error"] = detail; }
-	state->last_route = route; state->last_receipt = receipt;
+	state->current->last_route = route; state->current->last_receipt = receipt;
 }
 static void prepared_reply(const Dictionary &command, Dictionary &result) {
 	result["kind"] = "prepared"; result["operation_id"] = command["operation_id"]; result["params_digest"] = command["params_digest"];
@@ -690,26 +744,26 @@ static const char *prepare_history(const Dictionary &route, const Dictionary &co
 			!integer(range["offset"],1048575,offset) || !integer(range["length"],32768,length) || !length || !hex(encoded,length*2)) return "invalid_argument";
 	const uint64_t size = std::stoull(size_text);
 	if (!size || size > 1048576 || size > std::stoull(field(state->policy,"max_snapshot_bytes")) || offset+length > size) return "budget_exceeded";
-	const int cursor = int(std::stoull(field(state->checkpoint,"history_cursor")));
+	const int cursor = int(std::stoull(field(state->current->checkpoint,"history_cursor")));
 	const bool undo = field(change,"kind") == "undo";
-	const Array rows = state->checkpoint["history"];
+	const Array rows = state->current->checkpoint["history"];
 	const int index = undo ? cursor-1 : cursor;
 	if (index < 0 || index >= rows.size()) return "version_conflict";
 	const Dictionary row = rows[index];
 	if (field(row,"history_id") != field(material,"history_id") ||
-			field(row,undo ? "after_checkpoint_id" : "before_checkpoint_id") != field(state->checkpoint,"checkpoint_id") ||
+			field(row,undo ? "after_checkpoint_id" : "before_checkpoint_id") != field(state->current->checkpoint,"checkpoint_id") ||
 			field(row,undo ? "before_checkpoint_id" : "after_checkpoint_id") != field(range,"checkpoint_id")) return "version_conflict";
 	if (const char *error = check_scene_history_target()) return error;
 	Dictionary original = command.duplicate(); original.erase("history_material");
 	if (!state->pending) {
-		if (offset || field(state->last_receipt,"operation_id") == field(command,"operation_id")) return "version_conflict";
+		if (offset || field(state->current->last_receipt,"operation_id") == field(command,"operation_id")) return "version_conflict";
 		PreparedEdit edit;
 		edit.history = true; edit.ready = false; edit.command = original; edit.route = route; edit.body.reserve(size);
-		edit.checkpoint = state->checkpoint.duplicate(true);
+		edit.checkpoint = state->current->checkpoint.duplicate(true);
 		auto &cp = edit.checkpoint;
 		cp["checkpoint_id"] = range["checkpoint_id"]; cp["digest"] = material["digest"]; cp["size_bytes"] = material["size_bytes"];
 		cp["history_cursor"] = String::num_int64(undo ? cursor-1 : cursor+1);
-		cp["version"] = String::num_uint64(std::stoull(field(state->checkpoint,"version"))+1);
+		cp["version"] = String::num_uint64(std::stoull(field(state->current->checkpoint,"version"))+1);
 		state->pending = std::move(edit);
 	}
 	auto &edit = *state->pending;
@@ -734,7 +788,7 @@ const char *prepare_edit(const Dictionary &route, const Dictionary &command, con
 			!id(field(command,"operation_id")) || !hex(field(command,"params_digest"),64) || command["change"].get_type() != Variant::DICTIONARY ||
 			!shape(command["permit"],{"permit_id","project_id","document_id","view_id","lease_id","document_version","instance_generation","lease_generation","expires_at"})) return "invalid_argument";
 	const Dictionary permit = command["permit"], change = command["change"];
-	const auto version = field(state->checkpoint,"version"), kind = field(change,"kind");
+	const auto version = field(state->current->checkpoint,"version"), kind = field(change,"kind");
 	if (field(command,"expected_version") != version || version == "18446744073709551615") return "version_conflict";
 	if (field(command,"document_id") != field(route,"document_id") || !write_permit(route,permit)) return "permission_denied";
 	Dictionary effective = change;
@@ -758,19 +812,19 @@ const char *prepare_edit(const Dictionary &route, const Dictionary &command, con
 	if (state->pending) {
 		if (!pending_for(route,command) || !state->pending->command.recursive_equal(command,0)) return "version_conflict";
 	} else {
-		if (field(state->last_receipt,"operation_id") == field(command,"operation_id")) return "version_conflict";
+		if (field(state->current->last_receipt,"operation_id") == field(command,"operation_id")) return "version_conflict";
 		PreparedEdit edit;
 		String candidate;
-		if (const char *error = prepare_scene_transform(text(state->scene_bytes), route["document_id"], effective, edit.transform, candidate,kind == "gesture")) {
+		if (const char *error = prepare_scene_transform(text(state->current->scene_bytes), route["document_id"], effective, edit.transform, candidate,kind == "gesture")) {
 			if (std::string(error) == "invalid_argument") remember_uncommitted(route,command,"rejected",error);
 			return error;
 		}
 		edit.body = bytes(candidate);
-		const int cursor = static_cast<int>(std::stoull(field(state->checkpoint,"history_cursor")));
+		const int cursor = static_cast<int>(std::stoull(field(state->current->checkpoint,"history_cursor")));
 		if (edit.body.empty() || edit.body.size() > 1048576 || cursor >= 256) {
 			remember_uncommitted(route,command,"rejected","budget_exceeded"); return "budget_exceeded";
 		}
-		edit.command = command; edit.route = route; edit.checkpoint = state->checkpoint.duplicate(true);
+		edit.command = command; edit.route = route; edit.checkpoint = state->current->checkpoint.duplicate(true);
 		Dictionary &cp = edit.checkpoint;
 		Array history = cp["history"];
 		history.resize(cursor);
@@ -789,8 +843,8 @@ const char *prepare_edit(const Dictionary &route, const Dictionary &command, con
 const char *export_edit(const Dictionary &route, const Dictionary &command, Dictionary &result) {
 	if (!shape(command,{"method","document_id","expected_version"},{"candidate"}) || field(command,"document_id") != field(route,"document_id")) return "invalid_argument";
 	if (!command.has("candidate")) {
-		if (field(command,"expected_version") != field(state->checkpoint,"version")) return "version_conflict";
-		result["kind"] = "snapshot"; result["checkpoint"] = state->checkpoint; return nullptr;
+		if (field(command,"expected_version") != field(state->current->checkpoint,"version")) return "version_conflict";
+		result["kind"] = "snapshot"; result["checkpoint"] = state->current->checkpoint; return nullptr;
 	}
 	if (!shape(command["candidate"],{"operation_id","params_digest","checkpoint_id","offset","length"})) return "invalid_argument";
 	const Dictionary range = command["candidate"];
@@ -815,21 +869,21 @@ const char *confirm_edit(const Dictionary &route, const Dictionary &command, Dic
 	if (!same_operation(command,receipt) || !id(field(receipt,"receipt_id")) || field(receipt,"commit_state") != "committed" ||
 			field(receipt,"document_id") != field(route,"document_id")) return "version_conflict";
 	for (const char *key : {"document_id","version","saved_version","checkpoint_id"}) if (field(cp,key) != field(receipt,key)) return "version_conflict";
-	if (state->last_route.recursive_equal(route,0) && state->last_receipt.recursive_equal(receipt,0) && state->checkpoint.recursive_equal(cp,0)) {
+	if (state->current->last_route.recursive_equal(route,0) && state->current->last_receipt.recursive_equal(receipt,0) && state->current->checkpoint.recursive_equal(cp,0)) {
 		result["kind"] = "ack"; return nullptr;
 	}
 	if (field(receipt,"status") == "saved") {
-		auto saved = state->checkpoint.duplicate(true); saved["saved_version"] = saved["version"];
+		auto saved = state->current->checkpoint.duplicate(true); saved["saved_version"] = saved["version"];
 		if (state->pending || !id(field(command,"operation_id")) || !hex(field(command,"params_digest"),64) || !saved.recursive_equal(cp,0)) return "version_conflict";
-		state->checkpoint = saved;
+		state->current->checkpoint = saved;
 	} else {
 		if (field(receipt,"status") != "committed" || !pending_for(route,command) || !state->pending->ready || !state->pending->checkpoint.recursive_equal(cp,0)) return "version_conflict";
 		const auto version = std::stoull(field(cp,"version"));
 		const char *error = state->pending->history ? confirm_scene_history(state->pending->body,version) : confirm_scene_transform(state->pending->transform,version);
 		if (error) return error;
-		state->checkpoint = state->pending->checkpoint; state->scene_bytes = std::move(state->pending->body); state->pending.reset();
+		state->current->checkpoint = state->pending->checkpoint; state->current->scene_bytes = std::move(state->pending->body); state->pending.reset();
 	}
-	state->last_route = route; state->last_receipt = receipt; result["kind"] = "ack"; return nullptr;
+	state->current->last_route = route; state->current->last_receipt = receipt; result["kind"] = "ack"; return nullptr;
 }
 }
 
@@ -860,10 +914,10 @@ std::string material_hello(const std::string &body, bool &compatible) {
 	if (requested.size() > 9 || !requested.has("session.control")) return {};
 	// 只公布本构建已接通的 G01 方法。后续文档命令落实后在它们的实现处扩充能力表。
 	Array supported; supported.push_back("session.control");
-	const bool frozen_preview = state->purpose == "preview" && !state->checkpoint.is_empty();
+	const bool frozen_preview = state->purpose == "preview" && !state->current->checkpoint.is_empty();
 	if (frozen_preview && !requested.has("preview.run")) return {};
 	if (frozen_preview) supported.push_back("preview.run");
-	if (state->purpose == "editor" && !state->checkpoint.is_empty() && requested.has("scene.query")) supported.push_back("scene.query");
+	if (state->purpose == "editor" && !state->current->checkpoint.is_empty() && requested.has("scene.query")) supported.push_back("scene.query");
 	if (supported.has("scene.query") && requested.has("scene.checkpoint")) {
 		supported.push_back("scene.checkpoint");
 		for (const char *cap : {"scene.transform2d","scene.transform3d","scene.gesture","scene.history"}) if (requested.has(cap)) supported.push_back(cap);
@@ -881,8 +935,96 @@ std::string material_hello(const std::string &body, bool &compatible) {
 }
 
 bool awaiting_preview_start() {
-	return state && !state->preview_binding.is_empty() && state->last_receipt.is_empty();
+	return state && !state->preview_binding.is_empty() && state->current->last_receipt.is_empty();
 }
+
+namespace {
+String scene_path(const DocumentMaterial &doc) { return doc.resource_root + text(doc.main_scene); }
+std::string document_key(const std::string &type, const std::string &document) {
+	if (!id(type) || !id(document)) return {};
+	// 三个 ID 均使用 G01 的 ASCII 字符集，与 G02 的 JSON 数组编码逐字节相同。
+	return bytes(text("[\"" + state->project + "\",\"" + type + "\",\"" + document + "\"]").sha256_text());
+}
+DocumentMaterial *document_for_slot(const std::string &slot) {
+	if (slot == "launch") return state->startup_open ? &state->startup : nullptr;
+	const auto found = state->documents.find(slot);
+	return found == state->documents.end() ? nullptr : found->second.get();
+}
+/** 原进程按受信槽号重开材料，先核父、子封印及逐文件复制身份，再容许 Godot 解析。 */
+std::shared_ptr<DocumentMaterial> read_document_slot(const std::string &slot, const std::string &key, const std::string &digest) {
+	auto doc = std::make_shared<DocumentMaterial>();
+	const auto parent = state->root + L"\\content\\.godot\\meton-documents";
+	const auto root = joined(parent, slot);
+	File seal_file;
+	Variant parsed;
+	if (!pin_directory(doc->pins, parent) || !pin_directory(doc->pins, root) ||
+			!read_file(doc->pins, root + L"\\execution-seal.json", 1048576, seal_file, true) || seal_file.digest != digest ||
+			!json(seal_file, parsed) || !shape(parsed, {"format_version","slot","generation","launch_seal_digest","document_key","admission_digest","files"}, {"import_receipt_digest"})) return {};
+	Dictionary seal = parsed;
+	if (!version(seal) || field(seal, "generation") != state->generation || field(seal, "slot") != slot ||
+			field(seal, "launch_seal_digest") != state->startup.seal_digest || field(seal, "document_key") != key || !hex(field(seal,"admission_digest"),64)) return {};
+	for (const char *name : {"host_digest","engine_digest","policy_digest"}) seal[name] = state->build[name];
+	if (!verify_content(*doc, root + L"\\content", seal, "editor", false, false)) return {};
+	doc->resource_root = text("res://.godot/meton-documents/" + slot + "/content/");
+	doc->key = key; doc->seal_digest = digest;
+	return doc;
+}
+const char *activate_document(DocumentMaterial &doc) {
+	if (&doc != state->current && (state->pending || state->gesture)) return "version_conflict";
+	if (const char *error = activate_document_tab(scene_path(doc), doc.viewport_size, std::stoull(field(doc.checkpoint, "version")))) return error;
+	state->current = &doc;
+	return nullptr;
+}
+/** E01 私有生命周期控制与 A09 的业务通道分开。正文和持久操作均不经过这个端点。 */
+std::string document_lifecycle(const std::string &body) {
+	if (!state->query_enabled || state->purpose != "editor" || state->startup.key.empty() || body.size() > 2048) return "denied";
+	File request; request.bytes = body;
+	Variant parsed;
+	if (!json(request, parsed) || !shape(parsed, {"action","slot","document_key","seal_digest"}, {"document_type","document_id"})) return "denied";
+	const Dictionary command = parsed;
+	const auto action = field(command,"action"), slot = field(command,"slot"), key = field(command,"document_key"), digest = field(command,"seal_digest");
+	if ((slot != "launch" && !hex(slot,32)) || !hex(key,64) || !hex(digest,64)) return "denied";
+	DocumentMaterial *doc = document_for_slot(slot);
+	if (doc && (doc->key != key || doc->seal_digest != digest)) return "denied";
+	if (action == "close") {
+		if (!doc) return "closed";
+		if (doc == state->current) {
+			if (state->pending || state->gesture) return "busy";
+			DocumentMaterial *next = doc != &state->startup && state->startup_open ? &state->startup : nullptr;
+			if (!next) for (const auto &item : state->documents) {
+				if (item.second.get() != doc) { next = item.second.get(); break; }
+			}
+			if (next && activate_document(*next)) return "busy";
+		}
+		if (close_document_tab(scene_path(*doc))) return "busy";
+		if (state->current == doc) state->current = &state->startup;
+		if (slot == "launch") state->startup_open = false;
+		else { std::unique_lock<std::shared_mutex> lock(state->documents_mutex); state->documents.erase(slot); }
+		return "closed";
+	}
+	const std::string original = field(command, "document_id");
+	if ((action != "open" && action != "activate") || document_key(field(command,"document_type"),original) != key) return "denied";
+	bool inserted = false;
+	if (!doc) {
+		if (slot == "launch" || (state->startup_open && state->startup.key == key)) return "denied";
+		for (const auto &item : state->documents) if (item.second->key == key) return "busy";
+		auto opened = read_document_slot(slot, key, digest);
+		if (!opened || field(opened->source,"document_id") != original) return "denied";
+		doc = opened.get();
+		std::unique_lock<std::shared_mutex> lock(state->documents_mutex);
+		state->documents.emplace(slot, std::move(opened));
+		inserted = true;
+	}
+	if (field(doc->source,"document_id") != original) return "denied";
+	if (open_document_tab(scene_path(*doc))) {
+		if (inserted) { std::unique_lock<std::shared_mutex> lock(state->documents_mutex); state->documents.erase(slot); }
+		return "denied";
+	}
+	if (action == "activate" && activate_document(*doc)) return "busy";
+	return action == "activate" ? "active" : "opened";
+}
+}
+String material_editor_scene_path() { return state ? scene_path(*state->current) : String(); }
 
 /** 对同一冻结快照只接受一次启动。重查同一操作只返回原回执，不能替换当前场景。 */
 static const char *preview_command(const Dictionary &route, const Dictionary &packet, const Dictionary &command, Dictionary &result) {
@@ -891,49 +1033,55 @@ static const char *preview_command(const Dictionary &route, const Dictionary &pa
 		if (capability != "preview.run") return "permission_denied";
 		if (!shape(command,{"method","operation_id","params_digest","snapshot"}) || !id(field(command,"operation_id")) ||
 				!hex(field(command,"params_digest"),64)) return "invalid_argument";
-		if (!same_operation(route["preview_operation"],command) || !state->checkpoint.recursive_equal(command["snapshot"],0)) return "version_conflict";
-		if (state->last_receipt.is_empty()) {
+		if (!same_operation(route["preview_operation"],command) || !state->current->checkpoint.recursive_equal(command["snapshot"],0)) return "version_conflict";
+		if (state->current->last_receipt.is_empty()) {
 			Dictionary receipt;
 			receipt["operation_id"] = command["operation_id"]; receipt["params_digest"] = command["params_digest"];
 			receipt["status"] = "accepted"; receipt["commit_state"] = "not_committed";
-			for (const char *key : {"document_id","version","saved_version","checkpoint_id"}) receipt[key] = state->checkpoint[key];
-			state->last_route = route; state->last_receipt = receipt;
+			for (const char *key : {"document_id","version","saved_version","checkpoint_id"}) receipt[key] = state->current->checkpoint[key];
+			state->current->last_route = route; state->current->last_receipt = receipt;
 		}
 	} else if (method == "operation.query" || method == "operation.cancel") {
 		if (capability != "session.control") return "permission_denied";
 		if (!shape(command,{"method","operation_id","params_digest"}) || !id(field(command,"operation_id")) || !hex(field(command,"params_digest"),64)) return "invalid_argument";
 	} else return "permission_denied";
-	if (state->last_receipt.is_empty() || !state->last_route.recursive_equal(route,0)) return "recovery_required";
-	if (!same_operation(state->last_receipt,command)) return method == "preview.start" ? "version_conflict" : "recovery_required";
-	result["kind"] = "receipt"; result["receipt"] = state->last_receipt;
+	if (state->current->last_receipt.is_empty() || !state->current->last_route.recursive_equal(route,0)) return "recovery_required";
+	if (!same_operation(state->current->last_receipt,command)) return method == "preview.start" ? "version_conflict" : "recovery_required";
+	result["kind"] = "receipt"; result["receipt"] = state->current->last_receipt;
 	return nullptr;
 }
 
 std::string material_document(const std::string &route_text, const std::string &body) {
 	if (!materials_active() || (!state->query_enabled && state->preview_binding.is_empty())) return "{}";
+	if (route_text == "meton.document.lifecycle/1") return document_lifecycle(body);
 	File route_file, request; route_file.bytes = route_text; request.bytes = body;
 	Variant parsed_route, parsed;
-	if (!json(route_file, parsed_route) || !shape(parsed_route, {"binding","document_id","access"},{"view_id","preview_operation"}) ||
+	if (!json(route_file, parsed_route) || !shape(parsed_route, {"binding","document_id","access"},{"view_id","preview_operation","document_type","document_slot"}) ||
 			!json(request, parsed) || !shape(parsed, {"protocol","binding","packet"},{"view"})) return "{}";
 	Dictionary route = parsed_route, message = parsed;
 	if (!shape(route["binding"], {"project_id","session_id","instance_id","lease_id","instance_generation","lease_generation","purpose","lease_expires_at"}) ||
 			message["packet"].get_type() != Variant::DICTIONARY) return "{}";
 	Dictionary binding = route["binding"], packet = message["packet"];
 	if (!id(field(packet,"request_id"))) return "{}";
-	const auto access = field(route,"access"), document = field(state->checkpoint,"document_id");
+	const auto access = field(route,"access"), document = field(route,"document_id");
+	DocumentMaterial *target = &state->startup;
+	if (!state->startup.key.empty() || route.has("document_type") || route.has("document_slot")) {
+		target = document_for_slot(field(route,"document_slot"));
+		if (target && (target->key.empty() || document_key(field(route,"document_type"),document) != target->key)) target = nullptr;
+	}
 	Dictionary result; const char *error = nullptr;
 	if (message["binding"].get_type() != Variant::DICTIONARY || !binding.recursive_equal(message["binding"],0) ||
 			field(binding,"project_id") != state->project || field(binding,"session_id") != state->session || field(binding,"instance_id") != state->instance ||
 			field(binding,"instance_generation") != state->generation || field(binding,"purpose") != state->purpose ||
 			!id(field(binding,"lease_id")) || !decimal(field(binding,"lease_generation")) || field(binding,"lease_generation") == "0" ||
-			field(route,"document_id") != document || (access != "observe" && access != "edit")) error = "permission_denied";
+			!target || field(target->checkpoint,"document_id") != document || (access != "observe" && access != "edit")) error = "permission_denied";
 	else if (state->purpose == "preview" && (!state->preview_binding.recursive_equal(binding,0) || access != "observe" || route.has("view_id") ||
 			!route.has("preview_operation") || !shape(route["preview_operation"],{"operation_id","params_digest"}))) error = "permission_denied";
 	else if (state->purpose != "preview" && route.has("preview_operation")) error = "permission_denied";
 	else if (!future_utc(field(binding,"lease_expires_at"))) error = "scope_ended";
 	else if (!future_utc(field(packet,"deadline_at"))) error = "deadline_exceeded";
 	if (field(message,"protocol") == "meton.engine.surface/1" && message.has("view") && message["view"].get_type() == Variant::DICTIONARY) {
-		if (!error) error = state->purpose == "preview" ? "permission_denied" : gesture_input(route,message["view"],packet);
+		if (!error) error = state->purpose == "preview" || target != state->current ? "permission_denied" : gesture_input(route,message["view"],packet);
 		Dictionary reply; reply["kind"] = "ack"; reply["request_id"] = packet["request_id"]; reply["status"] = error ? "rejected" : "accepted";
 		if (error) { Dictionary detail; detail["code"] = error; reply["error"] = detail; }
 		message["binding"] = binding; message["packet"] = reply;
@@ -944,8 +1092,13 @@ std::string material_document(const std::string &route_text, const std::string &
 			packet["command"].get_type() != Variant::DICTIONARY) return "{}";
 	Dictionary command = packet["command"];
 	const auto method = field(command,"method");
+	if (!error && target != state->current && method != "document.query" && method != "document.open") error = "permission_denied";
 	if (state->purpose == "preview") {
 		if (!error) error = preview_command(route,packet,command,result);
+	} else if (!error && method == "document.open") {
+		if (!state->capabilities.has("scene.checkpoint") || field(packet,"capability") != "scene.checkpoint" ||
+				!shape(command,{"method","snapshot","access"}) || field(command,"access") != (access == "edit" ? "write" : "read")) error = "permission_denied";
+		else if (!target->checkpoint.recursive_equal(command["snapshot"],0)) error = "version_conflict";
 	} else if (!error && method != "document.query" && method != "document.select") {
 		const auto cap = field(packet,"capability");
 		if (!state->capabilities.has("scene.checkpoint")) error = "not_supported";
@@ -966,8 +1119,8 @@ std::string material_document(const std::string &route_text, const std::string &
 			if (method == "operation.cancel" && pending_for(route,command)) {
 				remember_uncommitted(route,state->pending->command,"cancelled",nullptr); state->pending.reset();
 			}
-			if (state->last_route.recursive_equal(route,0) && same_operation(state->last_receipt,command)) {
-				result["kind"] = "receipt"; result["receipt"] = state->last_receipt;
+			if (state->current->last_route.recursive_equal(route,0) && same_operation(state->current->last_receipt,command)) {
+				result["kind"] = "receipt"; result["receipt"] = state->current->last_receipt;
 			} else error = "recovery_required";
 		} else error = "not_supported";
 	}
@@ -978,13 +1131,17 @@ std::string material_document(const std::string &route_text, const std::string &
 			if (access != "edit" || !id(field(route,"view_id")) || !state->capabilities.has("scene.checkpoint")) error = "permission_denied";
 			else if (!shape(command,{"method","document_id","expected_version","node_ids"}) || command["node_ids"].get_type() != Variant::ARRAY ||
 					Array(command["node_ids"]).size() > 64) error = "invalid_argument";
-			else if (field(command,"expected_version") != field(state->checkpoint,"version") || state->pending || state->gesture) error = "version_conflict";
+			else if (field(command,"expected_version") != field(state->current->checkpoint,"version") || state->pending || state->gesture) error = "version_conflict";
 		}
-		Dictionary projection;
-		if (!error) error = scene_document_selection(command, text(document), projection);
+	}
+	if (!error && state->purpose == "editor" && (method == "document.query" || method == "document.select" || method == "document.open")) {
+		Dictionary projection, selection = command;
+		if (method == "document.open") { selection = Dictionary(); selection["after_event"] = "0"; }
+		if (target == state->current) error = scene_document_selection(selection, text(document), projection);
+		else error = inactive_document_selection(scene_path(*target), text(document), selection["after_event"], projection);
 		if (!error) {
-			for (const char *key : {"document_id","version","saved_version","history_cursor"}) projection[key] = state->checkpoint[key];
-			projection["checkpoint"] = state->checkpoint; projection["recovery"] = "ready";
+			for (const char *key : {"document_id","version","saved_version","history_cursor"}) projection[key] = target->checkpoint[key];
+			projection["checkpoint"] = target->checkpoint; projection["recovery"] = "ready";
 			result["kind"] = "state"; result["state"] = projection;
 		}
 	}
@@ -1008,7 +1165,7 @@ bool admit_materials(const List<String> &arguments) {
 	if (!length || length >= normalized.size() || state->root != normalized.data()) return false;
 	Pin token(nullptr); DWORD app = 0, size = 0;
 	if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &token.value) || !GetTokenInformation(token.value, TokenIsAppContainer, &app, sizeof(app), &size) || app != 1) return false;
-	if (!pin_directory(state->root, true)) return false;
+	if (!pin_directory(state->startup.pins, state->root, true)) return false;
 	bool accepted = verify(arguments, bytes(OS::get_singleton()->get_environment("METON_ENGINE_LAUNCH_DIGEST")));
 	state->active = accepted;
 	std::string control;
@@ -1039,24 +1196,81 @@ bool material_storage_matches() {
 	return false;
 }
 bool preparing_material_textures() { return materials_active() && state->prepare_textures; }
+bool checking_materials_only() { return materials_active() && state->check_only; }
 #ifdef TOOLS_ENABLED
-bool run_material_texture_preparation() { return preparing_material_textures() && prepare_texture_files(state->root, state->producer_json, state->textures); }
+bool run_material_texture_preparation() { return preparing_material_textures() && prepare_texture_files(state->root, state->producer_json, state->startup.textures); }
 #endif
 void install_material_uids() {
 	if (!materials_active()) return;
 	auto registry = ResourceUID::get_singleton();
-	for (const auto &entry : state->uids) registry->add_id(registry->text_to_id(text(entry.first)), text("res://" + entry.second));
+	for (const auto &entry : state->startup.uids) registry->add_id(registry->text_to_id(text(entry.first)), text("res://" + entry.second));
+}
+namespace {
+const std::string documents_prefix = "res://.godot/meton-documents/";
+/** 物理路径只能由宿主槽号和已验相对路径构成。读取者在完成本次查找前保持材料所有权。 */
+std::shared_ptr<DocumentMaterial> mounted_path(const std::string &value, std::string &relative) {
+	const size_t at = documents_prefix.size();
+	if (value.compare(0, at, documents_prefix) != 0 || value.size() <= at + 40 || value.compare(at + 32, 9, "/content/") != 0) return {};
+	const std::string slot = value.substr(at, 32);
+	std::shared_lock<std::shared_mutex> lock(state->documents_mutex);
+	const auto found = state->documents.find(slot);
+	if (found == state->documents.end()) return {};
+	relative = value.substr(at + 41);
+	return found->second;
+}
+}
+bool material_external_resource(const String &owner, const String &original, const String &type, const String &uid, String &resolved) {
+	if (!materials_active()) return false;
+	std::string source = bytes(owner), relative;
+	const auto mounted = mounted_path(source, relative);
+	const DocumentMaterial *doc = mounted.get();
+	if (!doc) {
+		if (source.compare(0, documents_prefix.size(), documents_prefix) == 0) return true;
+		if (state->startup.key.empty() || source.rfind("res://", 0) != 0) return false;
+		relative = source.substr(6);
+		if (!state->startup.allowed.count(relative)) return false;
+		doc = &state->startup;
+	}
+	if (!original.begins_with("res://")) return true;
+	const std::string target = bytes(original.trim_prefix("res://"));
+	const auto edges = doc->references.find(relative);
+	const auto kind = doc->types.find(target);
+	if (edges == doc->references.end() || kind == doc->types.end() || kind->second != bytes(type) ||
+			std::find(edges->second.begin(), edges->second.end(), target) == edges->second.end()) return true;
+	if (!uid.is_empty()) {
+		const auto found = doc->uids.find(bytes(uid));
+		if (found == doc->uids.end() || found->second != target) return true;
+	}
+	resolved = doc->resource_root + text(target);
+	return true;
+}
+String material_mounted_texture(const String &resource) {
+	if (!materials_active()) return {};
+	std::string relative;
+	const auto doc = mounted_path(bytes(resource), relative);
+	if (!doc) return {};
+	const auto found = doc->texture_remaps.find(relative);
+	return found == doc->texture_remaps.end() ? String() : doc->resource_root + text(found->second);
 }
 bool material_resource_allowed(const String &resource) {
 	if (!materials_active()) return true;
 	auto name = bytes(resource);
-	if (name.rfind("uid://", 0) == 0) { auto found = state->uids.find(name); return found != state->uids.end() && state->allowed.count(found->second); }
+	if (name.compare(0, documents_prefix.size(), documents_prefix) == 0) {
+		std::string relative;
+		const auto doc = mounted_path(name, relative);
+		return doc && doc->allowed.count(relative);
+	}
+	if (name.rfind("uid://", 0) == 0) { auto found = state->startup.uids.find(name); return found != state->startup.uids.end() && state->startup.allowed.count(found->second); }
 	if (name.rfind("res://", 0) == 0) name.erase(0, 6);
-	return name != "project.godot" && path(name) && state->allowed.count(name);
+	return name != "project.godot" && path(name) && state->startup.allowed.count(name);
 }
 bool material_load_allowed(const String &resource, const String &original) {
 	if (material_resource_allowed(resource)) return true;
-	const auto it = state->texture_remaps.find(bytes(original.trim_prefix("res://")));
-	return it != state->texture_remaps.end() && resource == text("res://" + it->second);
+	if (original.begins_with("res://.godot/meton-documents/")) {
+		const auto cache = material_mounted_texture(original);
+		return !cache.is_empty() && resource == cache;
+	}
+	const auto it = state->startup.texture_remaps.find(bytes(original.trim_prefix("res://")));
+	return it != state->startup.texture_remaps.end() && resource == text("res://" + it->second);
 }
 }

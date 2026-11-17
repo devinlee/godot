@@ -205,6 +205,7 @@ public:
 	void set_edited_scene_root(Node *p_root);
 	int get_edited_scene() const;
 	int get_edited_scene_from_path(const String &p_path) const;
+	List<Node *> get_scene_selection(int p_idx) const;
 	Node *get_edited_scene_root(int p_idx = -1);
 	int get_edited_scene_count() const;
 	Vector<EditedScene> get_edited_scenes() const;

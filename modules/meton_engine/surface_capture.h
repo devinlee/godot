@@ -22,6 +22,7 @@ struct CaptureStatus {
 	std::uint64_t control_sequence = 0;
 	std::uint64_t extent_sequence = 0;
 	std::uint32_t width = 0, height = 0;
+	std::uint64_t document_epoch = 0;
 };
 
 /** 仅 G03 受信调用者与渲染线程持有；不注册脚本类或公开窗口/资源句柄。 */
@@ -30,7 +31,7 @@ public:
 	static std::unique_ptr<SurfaceCapture> create(const CaptureContext &context, std::shared_ptr<SurfaceTransport> transport);
 	~SurfaceCapture();
 	/** 来源 RID 和版本由场景权威给定，同一线程换源不改变已经记录的帧版本。 */
-	bool source(RID viewport_texture, std::uint64_t document_version);
+	bool source(RID viewport_texture, std::uint64_t document_version, std::uint64_t document_epoch = 0);
 	/** 渲染线程：视口已画完、RD 尚未提交时记录本帧复制。 */
 	void capture();
 	/** 渲染线程：RD 提交以后才交给同一原生队列。 */

@@ -50,7 +50,7 @@ bool install_surface(const CaptureContext &context, std::shared_ptr<SurfaceTrans
 	current = capture.release(); target_fps.store(context.max_fps); shutdown_ms.store(context.shutdown_timeout_ms);
 	active.store(true); return true;
 }
-bool update_surface_source(RID texture, std::uint64_t version) { return current && current->source(texture, version); }
+bool update_surface_source(RID texture, std::uint64_t version, std::uint64_t epoch) { return current && current->source(texture, version, epoch); }
 CaptureStatus surface_status() { return current ? current->status() : CaptureStatus{false, true}; }
 void stop_surface() { if (current) { current->stop(); publish_status(); } }
 bool surface_main_iteration(bool wants_present) {

@@ -26,6 +26,7 @@ struct SurfaceCapture::Impl {
 	bool enhanced = false;
 	RID viewport_texture;
 	std::uint64_t version = 0, sequence = 0, generation = 0, timeline = 0;
+	std::uint64_t document_epoch = 0;
 	struct Slot {
 		ComPtr<ID3D12CommandAllocator> allocator;
 		ComPtr<ID3D12GraphicsCommandList> list;
@@ -36,6 +37,7 @@ struct SurfaceCapture::Impl {
 		SurfaceExport exported;
 		wire::Packet shape;
 		std::uint64_t extent_sequence = 0;
+		std::uint64_t document_epoch = 0;
 		RD::DataFormat format = RD::DATA_FORMAT_MAX;
 		std::shared_ptr<void> allocation;
 		ComPtr<ID3D12Resource> intermediate;
@@ -75,6 +77,7 @@ struct SurfaceCapture::Impl {
 			format.depth != 1 || format.array_layers != 1 || format.samples != RD::TEXTURE_SAMPLES_1 ||
 			(format.format != RD::DATA_FORMAT_R8G8B8A8_UNORM && format.format != RD::DATA_FORMAT_B8G8R8A8_UNORM)) { fail(E_INVALIDARG); return false; }
 		auto group = std::make_unique<Group>(); group->format = format.format; group->extent_sequence = facts.extent_sequence;
+		group->document_epoch = document_epoch;
 		auto &shape = group->shape; shape.instance_generation = context.instance_generation; shape.surface_id = context.surface_id;
 		if (!next(generation)) return false;
 		shape.surface_generation = generation; shape.adapter_luid = context.adapter_luid; shape.width = format.width; shape.height = format.height;
@@ -235,8 +238,9 @@ std::unique_ptr<SurfaceCapture> SurfaceCapture::create(const CaptureContext &con
 	if (SUCCEEDED(value->device->CheckFeatureSupport(D3D12_FEATURE_D3D12_OPTIONS12, &options, sizeof(options)))) value->enhanced = options.EnhancedBarriersSupported;
 	return std::unique_ptr<SurfaceCapture>(new SurfaceCapture(std::move(value)));
 }
-bool SurfaceCapture::source(RID texture, std::uint64_t version) {
-	if (!impl->on_thread() || impl->facts.stopping || !texture.is_valid()) return false;
+bool SurfaceCapture::source(RID texture, std::uint64_t version, std::uint64_t epoch) {
+	if (!impl->on_thread() || impl->facts.stopping || (!texture.is_valid() && !epoch)) return false;
+	if (epoch) impl->document_epoch = epoch;
 	impl->viewport_texture = texture; impl->version = version; return true;
 }
 void SurfaceCapture::capture() {
@@ -252,7 +256,7 @@ void SurfaceCapture::capture() {
 		format.width = self.facts.width; format.height = self.facts.height;
 	}
 	if (!self.active || self.active->shape.width != format.width || self.active->shape.height != format.height ||
-			self.active->format != format.format || self.active->extent_sequence != self.facts.extent_sequence) {
+			self.active->format != format.format || self.active->extent_sequence != self.facts.extent_sequence || self.active->document_epoch != self.document_epoch) {
 		if (!self.create_group(format)) { ++self.facts.skipped; return; }
 	}
 	auto &group = *self.active;
@@ -285,6 +289,7 @@ void SurfaceCapture::submitted() {
 	if (self.context.follows_extent) { frame.kind = wire::Kind::extent_frame; frame.extent_sequence = group.extent_sequence; }
 	if (!self.facts.stopping && self.transport->send(frame)) {
 		++self.facts.published; self.facts.surface_generation = group.shape.surface_generation; self.facts.document_version = self.pending.document_version;
+		self.facts.document_epoch = group.document_epoch;
 		if (self.context.input_queue_limit) {
 			update_input_scope(self.facts);
 			record_input_frame(frame, self.context.input_queue_limit);

@@ -4,7 +4,7 @@
 namespace meton::bridge {
 /** 仅受信 G03 启动/场景所有者在渲染线程调用；同一进程只装配一个当前表面会话。 */
 bool install_surface(const CaptureContext &context, std::shared_ptr<SurfaceTransport> transport, RID viewport_texture, std::uint64_t version);
-bool update_surface_source(RID viewport_texture, std::uint64_t version);
+bool update_surface_source(RID viewport_texture, std::uint64_t version, std::uint64_t document_epoch = 0);
 CaptureStatus surface_status();
 void stop_surface();
 /** main 每次迭代调用，决定本次是否允许绘制；控制与收尾不依赖绘制。 */

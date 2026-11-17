@@ -24,12 +24,13 @@ CaptureStatus scope;
 std::deque<std::uint64_t> published;
 std::deque<Pending> pending;
 std::uint64_t last_request = 0;
+std::uint64_t required_epoch = 0;
 
 std::uint64_t unix_ms() {
 	return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch()).count();
 }
 bool in_scope(const wire::Packet &p) {
-	return scope.visible && !scope.stopping && p.surface_generation == scope.surface_generation && p.control_sequence == scope.control_sequence &&
+	return scope.document_epoch == required_epoch && scope.visible && !scope.stopping && p.surface_generation == scope.surface_generation && p.control_sequence == scope.control_sequence &&
 			p.extent_sequence == scope.extent_sequence && p.document_version == scope.document_version && p.input_x < scope.width && p.input_y < scope.height;
 }
 /** 回执完整回显原绑定；如果执行后无法入队，让宿主按断线未知收尾。 */
@@ -66,6 +67,12 @@ wire::InputResult apply(Viewport *viewport, const wire::Packet &p) {
 	return wire::input_denied;
 }
 }
+std::uint64_t begin_document_input_epoch() {
+	std::lock_guard<std::mutex> lock(input_mutex);
+	if (required_epoch == UINT64_MAX) return 0;
+	published.clear();
+	return ++required_epoch;
+}
 void update_input_scope(const CaptureStatus &status) {
 	std::lock_guard<std::mutex> lock(input_mutex);
 	if (scope.control_sequence != status.control_sequence || scope.extent_sequence != status.extent_sequence ||
@@ -74,7 +81,7 @@ void update_input_scope(const CaptureStatus &status) {
 }
 void record_input_frame(const wire::Packet &frame, std::size_t limit) {
 	std::lock_guard<std::mutex> lock(input_mutex);
-	if (!limit) return;
+	if (!limit || scope.document_epoch != required_epoch) return;
 	if (published.size() >= limit) published.pop_front();
 	published.push_back(frame.sequence);
 }
@@ -86,7 +93,7 @@ bool gesture_frame(std::uint64_t frame, std::uint64_t version, std::uint32_t x, 
 }
 bool gesture_scope_current(const CaptureStatus &start) {
 	std::lock_guard<std::mutex> lock(input_mutex);
-	return scope.visible && !scope.stopping && start.document_version == scope.document_version && start.surface_generation == scope.surface_generation &&
+	return scope.document_epoch == required_epoch && start.document_epoch == required_epoch && scope.visible && !scope.stopping && start.document_version == scope.document_version && start.surface_generation == scope.surface_generation &&
 			start.control_sequence == scope.control_sequence && start.extent_sequence == scope.extent_sequence;
 }
 void queue_scene_input(const wire::Packet &packet, const std::shared_ptr<SurfaceTransport> &transport, std::size_t limit, std::uint32_t timeout_ms) {

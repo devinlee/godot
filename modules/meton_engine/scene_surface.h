@@ -17,6 +17,11 @@ struct SceneSurfaceLaunch {
 
 /** main 取当前场景的视口，仅将 RID 交给渲染线程建立捕获。 */
 void bind_scene_viewport();
+/** E01 已封印的文档可后台装入，由原生编辑器保存各页的选区、相机和历史。 */
+const char *open_document_tab(const String &path);
+const char *activate_document_tab(const String &path, const Size2i &requested_size, uint64_t version);
+const char *close_document_tab(const String &path);
+const char *inactive_document_selection(const String &path, const String &document, const String &after_event, Dictionary &projection);
 /** 配对控制在受限启动线程完成，随后把同一传输交给渲染线程。 */
 enum class SceneHandshake { ready, incompatible, rejected };
 SceneHandshake start_scene_control(const SceneSurfaceLaunch &launch, DWORD timeout_ms);

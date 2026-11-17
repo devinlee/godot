@@ -1454,6 +1454,10 @@ bool ResourceLoader::should_create_uid_file(const String &p_path) {
 }
 
 String ResourceLoader::_path_remap(const String &p_path, bool *r_translation_remapped) {
+#ifdef MODULE_METON_ENGINE_ENABLED
+	const String mounted = meton::bridge::material_mounted_texture(p_path);
+	if (!mounted.is_empty()) return mounted;
+#endif
 	String new_path = p_path;
 
 	if (translation_remaps.has(p_path)) {

@@ -256,7 +256,7 @@ class ControlOffsetTransformPreview : public Control {
 	GDCLASS(ControlOffsetTransformPreview, Control);
 
 	EditorPlugin *plugin = nullptr;
-	Control *selected_control = nullptr;
+	ObjectID selected_control_id;
 
 	friend class ControlEditorPlugin;
 
