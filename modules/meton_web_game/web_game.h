@@ -117,6 +117,8 @@ public:
     Dictionary boot();
     /** 私有准备不挂树，原生字段交接之后才能显式激活。 */
     Node *prepare_world();
+    /** 仅受信启动层在入树前取回本次构造的对象；公开 JS 不导出此装配端口。 */
+    Array project_objects() const;
     bool configure_world(Node *p_node);
     /** 仅受信原生装配交接私有 UI 父节点；普通 JS 不取得控件。 */
     bool configure_ui(Node *p_node);

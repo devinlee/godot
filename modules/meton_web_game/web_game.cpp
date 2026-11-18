@@ -4,6 +4,8 @@
 #include "web_support.generated.h"
 #include "web_identity.generated.h"
 #include "web_memory.generated.h"
+#include "web_resources.generated.h"
+#include "web_runtime_profile.generated.h"
 #include "meton_game_resources.generated.h"
 #include "meton_game_objects.generated.h"
 #include "meton_game_impact.generated.h"
@@ -117,6 +119,7 @@ public:
 
 void MetonWebGame::_bind_methods() {
     ClassDB::bind_method(D_METHOD("prepare_world"), &MetonWebGame::prepare_world);
+    ClassDB::bind_method(D_METHOD("project_objects"), &MetonWebGame::project_objects);
     ClassDB::bind_method(D_METHOD("configure_world", "node"), &MetonWebGame::configure_world);
     ClassDB::bind_method(D_METHOD("configure_ui", "node"), &MetonWebGame::configure_ui);
     ClassDB::bind_method(D_METHOD("activate_world"), &MetonWebGame::activate_world);
@@ -209,9 +212,31 @@ Node *MetonWebGame::prepare_world() {
     node->set_name("Actor");
     return node;
 }
+Array MetonWebGame::project_objects() const {
+    Array result;
+    if (revoked || world_token || execution_depth) return result;
+    for (const auto &entry : objects) {
+        auto *node = Object::cast_to<Node>(ObjectDB::get_instance(entry.second.object));
+        if (!node || entry.second.retired || node->get_parent() || node->is_inside_tree()) return Array();
+        result.push_back(node);
+    }
+    return result;
+}
 Dictionary MetonWebGame::inspect() {
     Dictionary result;
     result["binding_digest"] = METON_WEB_BINDING_DIGEST;
+    result["content_profile"] = "gw3-desktop-web-content-v1";
+    result["description_digest"] = MetonWebResourceSupport::INPUT_DIGEST;
+    result["runtime_profile_digest"] = MetonWebRuntimeProfile::INPUT_DIGEST;
+    result["runtime_profile"] = MetonWebRuntimeProfile::PROFILE;
+    result["gpu_pixels"] = int64_t(MetonWebRuntimeProfile::GPU_PIXELS);
+    Dictionary content_limits;
+    content_limits["files"] = MetonResourceSupport::CONTENT_FILES;
+    content_limits["bytes"] = MetonResourceSupport::CONTENT_BYTES;
+    content_limits["depth"] = MetonResourceSupport::CONTENT_DEPTH;
+    content_limits["pixels"] = MetonResourceSupport::GPU_PIXELS;
+    result["content_limits"] = content_limits;
+
     result["godot_revision"] = GODOT_REVISION;
     result["precision_bytes"] = int(sizeof(real_t));
     result["revoked"] = revoked;

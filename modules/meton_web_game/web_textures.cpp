@@ -1,3 +1,4 @@
+#include "web_runtime_profile.generated.h"
 #include "meton_game_content.h"
 #include "meton_game_textures.generated.h"
 #include "core/io/image.h"
@@ -133,6 +134,6 @@ Dictionary MetonGameContent::texture_state() {
     report["bytes"] = int64_t(bytes); report["pixels"] = int64_t(pixels); report["pending_release"] = pending; report["backend_observed"] = observed;
     report["peak_bytes"] = int64_t(peak_texture_bytes); report["peak_pixels"] = int64_t(peak_texture_pixels); report["decoded_payload_peak"] = int64_t(decoded_payload_peak);
     report["uploads"] = int(texture_uploads); report["retired"] = int(retired_textures); report["refusals"] = int(texture_refusals); report["entries"] = entries;
-    report["limit_bytes"] = int64_t(MetonTextureSupport::TEXTURE_BYTES); report["limit_pixels"] = int64_t(MetonTextureSupport::PIXELS);
+    report["limit_bytes"] = int64_t(MetonTextureSupport::TEXTURE_BYTES); report["limit_pixels"] = int64_t(MetonWebRuntimeProfile::GPU_PIXELS);
     return report;
 }
