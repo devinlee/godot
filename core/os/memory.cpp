@@ -38,6 +38,15 @@
 #endif
 
 #include <cstdlib>
+#include "modules/modules_enabled.gen.h"
+#if defined(MODULE_METON_JS_ENABLED) || defined(MODULE_METON_WEB_GAME_ENABLED)
+#include "modules/meton_js/meton_native_memory_abi.h"
+// 所有配对使用同一分配头；没有游戏作用域的块不扣资源预算。
+#define malloc meton_resource_alloc
+#define calloc meton_resource_calloc
+#define realloc meton_resource_realloc
+#define free meton_resource_free
+#endif
 
 #ifdef DEBUG_ENABLED
 static SafeNumeric<uint64_t> _current_mem_usage;
@@ -53,6 +62,11 @@ void *operator new(size_t p_size, void *(*p_allocfunc)(size_t p_size)) {
 }
 
 void *Memory::alloc_aligned_static(size_t p_bytes, size_t p_alignment) {
+#if defined(MODULE_METON_JS_ENABLED) || defined(MODULE_METON_WEB_GAME_ENABLED)
+	void *memory = meton_resource_alloc_aligned(p_bytes, p_alignment);
+	if (memory) GodotProfileAlloc(memory, p_bytes);
+	return memory;
+#else
 	DEV_ASSERT(Math::is_power_of_2(p_alignment));
 
 	void *p1, *p2;
@@ -64,9 +78,16 @@ void *Memory::alloc_aligned_static(size_t p_bytes, size_t p_alignment) {
 	p2 = (void *)(((uintptr_t)p1 + sizeof(uint32_t) + p_alignment - 1) & ~((p_alignment)-1));
 	*((uint32_t *)p2 - 1) = (uint32_t)((uintptr_t)p2 - (uintptr_t)p1);
 	return p2;
+#endif
 }
 
 void *Memory::realloc_aligned_static(void *p_memory, size_t p_bytes, size_t p_prev_bytes, size_t p_alignment) {
+#if defined(MODULE_METON_JS_ENABLED) || defined(MODULE_METON_WEB_GAME_ENABLED)
+	if (p_memory) GodotProfileFree(p_memory);
+	void *memory = meton_resource_realloc_aligned(p_memory, p_bytes, p_prev_bytes, p_alignment);
+	if (memory) GodotProfileAlloc(memory, p_bytes);
+	return memory;
+#else
 	if (p_memory == nullptr) {
 		return alloc_aligned_static(p_bytes, p_alignment);
 	}
@@ -77,13 +98,19 @@ void *Memory::realloc_aligned_static(void *p_memory, size_t p_bytes, size_t p_pr
 	}
 	free_aligned_static(p_memory);
 	return ret;
+#endif
 }
 
 void Memory::free_aligned_static(void *p_memory) {
+#if defined(MODULE_METON_JS_ENABLED) || defined(MODULE_METON_WEB_GAME_ENABLED)
+	if (p_memory) GodotProfileFree(p_memory);
+	meton_resource_free_aligned(p_memory);
+#else
 	uint32_t offset = *((uint32_t *)p_memory - 1);
 	void *p = (void *)((uint8_t *)p_memory - offset);
 	GodotProfileFree(p);
 	free(p);
+#endif
 }
 
 template <bool p_ensure_zero>

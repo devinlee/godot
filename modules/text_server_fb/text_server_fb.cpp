@@ -29,6 +29,10 @@
 /**************************************************************************/
 
 #include "text_server_fb.h"
+#ifdef METON_GAME_ATLAS_ENABLED
+#include "scene/resources/font.h"
+#include "meton_font_cache.h"
+#endif
 
 #include "core/config/project_settings.h"
 #include "core/error/error_macros.h"
@@ -104,9 +108,19 @@ int64_t TextServerFallback::_get_features() const {
 void TextServerFallback::_free_rid(const RID &p_rid) {
 	_THREAD_SAFE_METHOD_
 	if (font_owner.owns(p_rid)) {
+#ifdef METON_GAME_ATLAS_ENABLED
+		FontFallback *fd = font_owner.get_or_null(p_rid);
+		if (fd->local_system_fonts) {
+			_clear_system_font_store(*fd->local_system_fonts);
+			memdelete(fd->local_system_fonts);
+			fd->local_system_fonts = nullptr;
+		}
+#endif
 		MutexLock ftlock(ft_mutex);
+#ifndef METON_GAME_ATLAS_ENABLED
 
 		FontFallback *fd = font_owner.get_or_null(p_rid);
+#endif
 		for (const KeyValue<Vector2i, FontForSizeFallback *> &ffsd : fd->cache) {
 			OversamplingLevel *ol = oversampling_levels.getptr(ffsd.value->viewport_oversampling);
 			if (ol != nullptr) {
@@ -237,6 +251,44 @@ String TextServerFallback::_tag_to_name(int64_t p_tag) const {
 /* Font Glyph Rendering                                                  */
 /*************************************************************************/
 
+#ifdef METON_GAME_ATLAS_ENABLED
+namespace {
+// get_rids 会初始化字号信息。只在当前线程创建这个字体时交接额度，让 FreeType 从首次分配就计入本局。
+struct MetonFaceCreation {
+	std::shared_ptr<MetonFontAtlasOwner> owner;
+	RID created;
+};
+thread_local MetonFaceCreation *meton_creating_face = nullptr;
+}
+
+RID meton_create_font_atlas(FontFile &p_font, const std::shared_ptr<MetonFontAtlasOwner> &p_owner) {
+	if (!p_owner || !Thread::is_main_thread() || meton_creating_face || p_font.get_cache_count() != 0 || !p_font.get_fallbacks().is_empty()) {
+		return RID();
+	}
+	MetonFaceCreation creation{p_owner, RID()};
+	meton_creating_face = &creation;
+	const TypedArray<RID> faces = p_font.get_rids();
+	meton_creating_face = nullptr;
+	return faces.size() == 1 && RID(faces[0]) == creation.created ? creation.created : RID();
+}
+
+bool TextServerFallback::ShelfPackTexture::upload(const Ref<Image> &p_image) {
+	if (atlas_page && !atlas_page->can_upload()) {
+		return false;
+	}
+	if (texture.is_valid()) {
+		texture->update(p_image);
+		return true;
+	}
+	texture = ImageTexture::create_from_image(p_image);
+	if (atlas_page && !atlas_page->uploaded(texture)) {
+		texture.unref();
+		return false;
+	}
+	return texture.is_valid();
+}
+
+#endif
 _FORCE_INLINE_ TextServerFallback::FontTexturePosition TextServerFallback::find_texture_pos_for_glyph(FontForSizeFallback *p_data, int p_color_size, Image::Format p_image_format, int p_width, int p_height, bool p_msdf) const {
 	FontTexturePosition ret;
 
@@ -279,8 +331,24 @@ _FORCE_INLINE_ TextServerFallback::FontTexturePosition TextServerFallback::find_
 			texsize = Math::next_power_of_2((uint32_t)mh);
 		}
 
+#ifdef METON_GAME_ATLAS_ENABLED
+		ShelfPackTexture tex(texsize, texsize);
+		if (p_data->owner->atlas_owner) {
+			tex.atlas_page = p_data->owner->atlas_owner->reserve(texsize, p_color_size, p_data->owner->mipmaps);
+			if (!tex.atlas_page) {
+				return ret;
+			}
+		}
+#else
 		ShelfPackTexture tex = ShelfPackTexture(texsize, texsize);
+#endif
 		tex.image = Image::create_empty(texsize, texsize, false, p_image_format);
+#ifdef METON_GAME_ATLAS_ENABLED
+		ERR_FAIL_COND_V(tex.image.is_null(), ret);
+		if (tex.atlas_page) {
+			tex.atlas_page->image_created(tex.image);
+		}
+#endif
 		{
 			// Zero texture.
 			uint8_t *w = tex.image->ptrw();
@@ -451,6 +519,11 @@ _FORCE_INLINE_ TextServerFallback::FontGlyph TextServerFallback::rasterize_msdf(
 		ERR_FAIL_COND_V(mh > 4096, FontGlyph());
 
 		FontTexturePosition tex_pos = find_texture_pos_for_glyph(p_data, 4, Image::FORMAT_RGBA8, mw, mh, true);
+#ifdef METON_GAME_ATLAS_ENABLED
+		if (tex_pos.index < 0 && p_data->owner->atlas_owner && p_data->owner->atlas_owner->fault() != OK) {
+			return FontGlyph();
+		}
+#endif
 		ERR_FAIL_COND_V(tex_pos.index < 0, FontGlyph());
 		ShelfPackTexture &tex = p_data->textures.write[tex_pos.index];
 
@@ -544,6 +617,11 @@ _FORCE_INLINE_ TextServerFallback::FontGlyph TextServerFallback::rasterize_bitma
 	Image::Format require_format = color_size == 4 ? Image::FORMAT_RGBA8 : Image::FORMAT_LA8;
 
 	FontTexturePosition tex_pos = find_texture_pos_for_glyph(p_data, color_size, require_format, mw, mh, false);
+#ifdef METON_GAME_ATLAS_ENABLED
+	if (tex_pos.index < 0 && p_data->owner->atlas_owner && p_data->owner->atlas_owner->fault() != OK) {
+		return FontGlyph();
+	}
+#endif
 	ERR_FAIL_COND_V(tex_pos.index < 0, FontGlyph());
 
 	// Fit character in char texture.
@@ -626,6 +704,12 @@ _FORCE_INLINE_ TextServerFallback::FontGlyph TextServerFallback::rasterize_bitma
 /*************************************************************************/
 
 bool TextServerFallback::_ensure_glyph(FontFallback *p_font_data, const Vector2i &p_size, int32_t p_glyph, FontGlyph &r_glyph, uint32_t p_oversampling) const {
+#ifdef METON_GAME_ATLAS_ENABLED
+	MetonFontMemoryScope atlas_memory(p_font_data->atlas_owner.get());
+	if (p_font_data->atlas_owner && p_font_data->atlas_owner->fault() != OK) {
+		return false;
+	}
+#endif
 	FontForSizeFallback *fd = nullptr;
 	ERR_FAIL_COND_V(!_ensure_cache_for_size(p_font_data, p_size, fd, false, p_oversampling), false);
 
@@ -771,7 +855,11 @@ bool TextServerFallback::_ensure_glyph(FontFallback *p_font_data, const Vector2i
 			}
 		} else {
 			FT_Stroker stroker;
+#ifdef METON_GAME_ATLAS_ENABLED
+			if (FT_Stroker_New(p_font_data->face->glyph->library, &stroker) != 0) {
+#else
 			if (FT_Stroker_New(ft_library, &stroker) != 0) {
+#endif
 				fd->glyph_map[p_glyph] = FontGlyph();
 				ERR_FAIL_V_MSG(false, "FreeType: Failed to load glyph stroker.");
 			}
@@ -797,6 +885,11 @@ bool TextServerFallback::_ensure_glyph(FontFallback *p_font_data, const Vector2i
 		cleanup_stroker:
 			FT_Stroker_Done(stroker);
 		}
+#ifdef METON_GAME_ATLAS_ENABLED
+		if (p_font_data->atlas_owner && p_font_data->atlas_owner->fault() != OK) {
+			return false;
+		}
+#endif
 		gl.from_svg = from_svg;
 		E = fd->glyph_map.insert(p_glyph, gl);
 		r_glyph = E->value;
@@ -808,7 +901,44 @@ bool TextServerFallback::_ensure_glyph(FontFallback *p_font_data, const Vector2i
 	return false;
 }
 
+#ifdef METON_GAME_ATLAS_ENABLED
+#ifdef MODULE_FREETYPE_ENABLED
+FT_Error TextServerFallback::_font_library(FontFallback *p_font, FT_Library &r_library) const {
+	MutexLock lock(ft_mutex);
+	FT_Library &library = p_font->atlas_owner ? p_font->atlas_ft_library : ft_library;
+	if (!library) {
+		FT_Error error;
+		if (p_font->atlas_owner) {
+			FT_MemoryRec_ &memory = p_font->atlas_ft_memory;
+			memory.user = p_font->atlas_owner.get();
+			memory.alloc = [](FT_Memory m, long size) -> void * { return static_cast<MetonFontAtlasOwner *>(m->user)->allocate(size); };
+			memory.realloc = [](FT_Memory m, long, long size, void *block) -> void * { return static_cast<MetonFontAtlasOwner *>(m->user)->resize(block, size); };
+			memory.free = [](FT_Memory m, void *block) { static_cast<MetonFontAtlasOwner *>(m->user)->deallocate(block); };
+			error = FT_New_Library(&memory, &library);
+			if (!error) {
+				FT_Add_Default_Modules(library);
+				FT_Set_Default_Properties(library);
+			}
+		} else {
+			error = FT_Init_FreeType(&library);
+		}
+		if (error) {
+			return error;
+		}
+#ifdef MODULE_SVG_ENABLED
+		FT_Property_Set(library, "ot-svg", "svg-hooks", get_tvg_svg_in_ot_hooks());
+#endif
+	}
+	r_library = library;
+	return 0;
+}
+#endif
+
+#endif
 bool TextServerFallback::_ensure_cache_for_size(FontFallback *p_font_data, const Vector2i &p_size, FontForSizeFallback *&r_cache_for_size, bool p_silent, uint32_t p_oversampling) const {
+#ifdef METON_GAME_ATLAS_ENABLED
+	MetonFontMemoryScope atlas_memory(p_font_data->atlas_owner.get());
+#endif
 	ERR_FAIL_COND_V(p_size.x <= 0, false);
 
 	HashMap<Vector2i, FontForSizeFallback *>::Iterator E = p_font_data->cache.find(p_size);
@@ -835,9 +965,22 @@ bool TextServerFallback::_ensure_cache_for_size(FontFallback *p_font_data, const
 	if (p_font_data->data_ptr && (p_font_data->data_size > 0)) {
 		// Init dynamic font.
 #ifdef MODULE_FREETYPE_ENABLED
+#ifdef METON_GAME_ATLAS_ENABLED
+		FT_Library library = nullptr;
+		int error = _font_library(p_font_data, library);
+		if (error) {
+			memdelete(fd);
+			if (p_silent) {
+				return false;
+			}
+			ERR_FAIL_V_MSG(false, "FreeType: Error initializing library: '" + String(FT_Error_String(error)) + "'.");
+		}
+#else
 		int error = 0;
+#endif
 		{
 			MutexLock ftlock(ft_mutex);
+#ifndef METON_GAME_ATLAS_ENABLED
 			if (!ft_library) {
 				error = FT_Init_FreeType(&ft_library);
 				if (error != 0) {
@@ -853,6 +996,7 @@ bool TextServerFallback::_ensure_cache_for_size(FontFallback *p_font_data, const
 #endif
 			}
 
+#endif
 			if (p_font_data->face == nullptr) {
 				memset(&p_font_data->stream, 0, sizeof(FT_StreamRec));
 				p_font_data->stream.base = (unsigned char *)p_font_data->data_ptr;
@@ -868,7 +1012,11 @@ bool TextServerFallback::_ensure_cache_for_size(FontFallback *p_font_data, const
 
 				int max_index = 0;
 				FT_Face tmp_face = nullptr;
+#ifdef METON_GAME_ATLAS_ENABLED
+				error = FT_Open_Face(library, &fargs, -1, &tmp_face);
+#else
 				error = FT_Open_Face(ft_library, &fargs, -1, &tmp_face);
+#endif
 				if (tmp_face && error == 0) {
 					max_index = tmp_face->num_faces - 1;
 				}
@@ -876,7 +1024,11 @@ bool TextServerFallback::_ensure_cache_for_size(FontFallback *p_font_data, const
 					FT_Done_Face(tmp_face);
 				}
 
+#ifdef METON_GAME_ATLAS_ENABLED
+				error = FT_Open_Face(library, &fargs, CLAMP(p_font_data->face_index, 0, max_index), &p_font_data->face);
+#else
 				error = FT_Open_Face(ft_library, &fargs, CLAMP(p_font_data->face_index, 0, max_index), &p_font_data->face);
+#endif
 				if (error) {
 					FT_Done_Face(p_font_data->face);
 					p_font_data->face = nullptr;
@@ -989,7 +1141,11 @@ bool TextServerFallback::_ensure_cache_for_size(FontFallback *p_font_data, const
 				for (FT_UInt i = 0; i < amaster->num_axis; i++) {
 					p_font_data->supported_varaitions[(int32_t)amaster->axis[i].tag] = Vector3i(amaster->axis[i].minimum / 65536, amaster->axis[i].maximum / 65536, amaster->axis[i].def / 65536);
 				}
+#ifdef METON_GAME_ATLAS_ENABLED
+				FT_Done_MM_Var(library, amaster);
+#else
 				FT_Done_MM_Var(ft_library, amaster);
+#endif
 			}
 			p_font_data->face_init = true;
 		}
@@ -1035,7 +1191,11 @@ bool TextServerFallback::_ensure_cache_for_size(FontFallback *p_font_data, const
 			}
 
 			FT_Set_Var_Design_Coordinates(p_font_data->face, coords.size(), coords.ptrw());
+#ifdef METON_GAME_ATLAS_ENABLED
+			FT_Done_MM_Var(library, amaster);
+#else
 			FT_Done_MM_Var(ft_library, amaster);
+#endif
 		}
 #else
 		memdelete(fd);
@@ -1126,7 +1286,16 @@ RID TextServerFallback::_create_font() {
 
 	FontFallback *fd = memnew(FontFallback);
 
+#ifdef METON_GAME_ATLAS_ENABLED
+	RID rid = font_owner.make_rid(fd);
+	if (meton_creating_face && !meton_creating_face->created.is_valid()) {
+		fd->atlas_owner = meton_creating_face->owner;
+		meton_creating_face->created = rid;
+	}
+	return rid;
+#else
 	return font_owner.make_rid(fd);
+#endif
 }
 
 RID TextServerFallback::_create_font_linked_variation(const RID &p_font_rid) {
@@ -1210,6 +1379,12 @@ int64_t TextServerFallback::_font_get_face_count(const RID &p_font_rid) const {
 	if (fd->data_ptr && (fd->data_size > 0)) {
 		// Init dynamic font.
 #ifdef MODULE_FREETYPE_ENABLED
+#ifdef METON_GAME_ATLAS_ENABLED
+		MetonFontMemoryScope atlas_memory(fd->atlas_owner.get());
+		FT_Library library = nullptr;
+		int error = _font_library(fd, library);
+		ERR_FAIL_COND_V_MSG(error != 0, false, "FreeType: Error initializing library: '" + String(FT_Error_String(error)) + "'.");
+#else
 		int error = 0;
 		if (!ft_library) {
 			error = FT_Init_FreeType(&ft_library);
@@ -1218,6 +1393,7 @@ int64_t TextServerFallback::_font_get_face_count(const RID &p_font_rid) const {
 			FT_Property_Set(ft_library, "ot-svg", "svg-hooks", get_tvg_svg_in_ot_hooks());
 #endif
 		}
+#endif
 
 		FT_StreamRec stream;
 		memset(&stream, 0, sizeof(FT_StreamRec));
@@ -1235,7 +1411,11 @@ int64_t TextServerFallback::_font_get_face_count(const RID &p_font_rid) const {
 		MutexLock ftlock(ft_mutex);
 
 		FT_Face tmp_face = nullptr;
+#ifdef METON_GAME_ATLAS_ENABLED
+		error = FT_Open_Face(library, &fargs, -1, &tmp_face);
+#else
 		error = FT_Open_Face(ft_library, &fargs, -1, &tmp_face);
+#endif
 		if (error == 0) {
 			face_count = tmp_face->num_faces;
 			FT_Done_Face(tmp_face);
@@ -2483,6 +2663,9 @@ RID TextServerFallback::_font_get_glyph_texture_rid(const RID &p_font_rid, const
 
 	if (fgl.texture_idx != -1) {
 		if (ffsd->textures[fgl.texture_idx].dirty) {
+#ifdef METON_GAME_ATLAS_ENABLED
+			MetonFontMemoryScope atlas_memory(fd->atlas_owner.get());
+#endif
 			ShelfPackTexture &tex = ffsd->textures.write[fgl.texture_idx];
 			Ref<Image> img = tex.image;
 			if (fgl.from_svg) {
@@ -2493,10 +2676,15 @@ RID TextServerFallback::_font_get_glyph_texture_rid(const RID &p_font_rid, const
 				img = tex.image->duplicate();
 				img->generate_mipmaps();
 			}
+#ifdef METON_GAME_ATLAS_ENABLED
+			if (!tex.upload(img)) {
+				return RID();
+#else
 			if (tex.texture.is_null()) {
 				tex.texture = ImageTexture::create_from_image(img);
 			} else {
 				tex.texture->update(img);
+#endif
 			}
 			tex.dirty = false;
 		}
@@ -2533,6 +2721,9 @@ Size2 TextServerFallback::_font_get_glyph_texture_size(const RID &p_font_rid, co
 
 	if (fgl.texture_idx != -1) {
 		if (ffsd->textures[fgl.texture_idx].dirty) {
+#ifdef METON_GAME_ATLAS_ENABLED
+			MetonFontMemoryScope atlas_memory(fd->atlas_owner.get());
+#endif
 			ShelfPackTexture &tex = ffsd->textures.write[fgl.texture_idx];
 			Ref<Image> img = tex.image;
 			if (fgl.from_svg) {
@@ -2543,10 +2734,15 @@ Size2 TextServerFallback::_font_get_glyph_texture_size(const RID &p_font_rid, co
 				img = tex.image->duplicate();
 				img->generate_mipmaps();
 			}
+#ifdef METON_GAME_ATLAS_ENABLED
+			if (!tex.upload(img)) {
+				return Size2();
+#else
 			if (tex.texture.is_null()) {
 				tex.texture = ImageTexture::create_from_image(img);
 			} else {
 				tex.texture->update(img);
+#endif
 			}
 			tex.dirty = false;
 		}
@@ -2962,6 +3158,9 @@ void TextServerFallback::_font_draw_glyph(const RID &p_font_rid, const RID &p_ca
 			}
 #endif
 			if (ffsd->textures[fgl.texture_idx].dirty) {
+#ifdef METON_GAME_ATLAS_ENABLED
+				MetonFontMemoryScope atlas_memory(fd->atlas_owner.get());
+#endif
 				ShelfPackTexture &tex = ffsd->textures.write[fgl.texture_idx];
 				Ref<Image> img = tex.image;
 				if (fgl.from_svg) {
@@ -2972,10 +3171,15 @@ void TextServerFallback::_font_draw_glyph(const RID &p_font_rid, const RID &p_ca
 					img = tex.image->duplicate();
 					img->generate_mipmaps();
 				}
+#ifdef METON_GAME_ATLAS_ENABLED
+				if (!tex.upload(img)) {
+					return;
+#else
 				if (tex.texture.is_null()) {
 					tex.texture = ImageTexture::create_from_image(img);
 				} else {
 					tex.texture->update(img);
+#endif
 				}
 				tex.dirty = false;
 			}
@@ -3105,16 +3309,24 @@ void TextServerFallback::_font_draw_glyph_outline(const RID &p_font_rid, const R
 			}
 #endif
 			if (ffsd->textures[fgl.texture_idx].dirty) {
+#ifdef METON_GAME_ATLAS_ENABLED
+				MetonFontMemoryScope atlas_memory(fd->atlas_owner.get());
+#endif
 				ShelfPackTexture &tex = ffsd->textures.write[fgl.texture_idx];
 				Ref<Image> img = tex.image;
 				if (fd->mipmaps && !img->has_mipmaps()) {
 					img = tex.image->duplicate();
 					img->generate_mipmaps();
 				}
+#ifdef METON_GAME_ATLAS_ENABLED
+				if (!tex.upload(img)) {
+					return;
+#else
 				if (tex.texture.is_null()) {
 					tex.texture = ImageTexture::create_from_image(img);
 				} else {
 					tex.texture->update(img);
+#endif
 				}
 				tex.dirty = false;
 			}
@@ -4459,9 +4671,19 @@ bool TextServerFallback::_shaped_text_update_justification_ops(const RID &p_shap
 }
 
 RID TextServerFallback::_find_sys_font_for_text(const RID &p_fdef, const String &p_script_code, const String &p_language, const String &p_text) {
+#ifdef METON_GAME_ATLAS_ENABLED
+	_THREAD_SAFE_METHOD_
+#endif
 	RID f;
 	// Try system fallback.
 	if (_font_is_allow_system_fallback(p_fdef)) {
+#ifdef METON_GAME_ATLAS_ENABLED
+		FontFallback *primary = _get_font_data(p_fdef);
+		MetonFontMemoryScope atlas_memory(primary ? primary->atlas_owner.get() : nullptr);
+		SystemFontStore &store = primary && primary->local_system_fonts ? *primary->local_system_fonts : shared_system_fonts;
+		auto &system_fonts = store.fonts;
+		auto &system_font_data = store.data;
+#endif
 		String font_name = _font_get_name(p_fdef);
 		BitField<FontStyle> font_style = _font_get_style(p_fdef);
 		int font_weight = _font_get_weight(p_fdef);
@@ -4530,6 +4752,11 @@ RID TextServerFallback::_find_sys_font_for_text(const RID &p_fdef, const String 
 
 				SystemFontCacheRec sysf;
 				sysf.rid = _create_font();
+#ifdef METON_GAME_ATLAS_ENABLED
+				if (primary && primary->atlas_owner) {
+					font_owner.get_or_null(sysf.rid)->atlas_owner = primary->atlas_owner;
+				}
+#endif
 				_font_set_data_ptr(sysf.rid, font_data.ptr(), font_data.size());
 				if (!_font_validate(sysf.rid)) {
 					_free_rid(sysf.rid);
@@ -5376,15 +5603,48 @@ TextServerFallback::TextServerFallback() {
 	ProjectSettings::get_singleton()->connect("settings_changed", callable_mp(this, &TextServerFallback::_update_settings));
 }
 
+#ifdef METON_GAME_ATLAS_ENABLED
+bool meton_isolate_system_font_cache(const RID &p_font) {
+	Ref<TextServerFallback> server = TS;
+	return server.is_valid() && server->use_private_system_font_cache(p_font);
+}
+
+bool TextServerFallback::use_private_system_font_cache(const RID &p_font_rid) {
+	_THREAD_SAFE_METHOD_
+	FontFallback *fd = font_owner.get_or_null(p_font_rid);
+	if (!fd) {
+		return false;
+	}
+	if (!fd->local_system_fonts) {
+		fd->local_system_fonts = memnew(SystemFontStore);
+	}
+	return true;
+}
+
+void TextServerFallback::_clear_system_font_store(SystemFontStore &p_store) {
+	for (const KeyValue<SystemFontKey, SystemFontCache> &E : p_store.fonts) {
+#else
 void TextServerFallback::_font_clear_system_fallback_cache() {
 	for (const KeyValue<SystemFontKey, SystemFontCache> &E : system_fonts) {
+#endif
 		const Vector<SystemFontCacheRec> &sysf_cache = E.value.var;
 		for (const SystemFontCacheRec &F : sysf_cache) {
 			_free_rid(F.rid);
 		}
 	}
+#ifdef METON_GAME_ATLAS_ENABLED
+	p_store.fonts.clear();
+	// Files back pointers held by the faces above and must outlive all of them.
+	p_store.data.clear();
+}
+
+void TextServerFallback::_font_clear_system_fallback_cache() {
+	_THREAD_SAFE_METHOD_
+	_clear_system_font_store(shared_system_fonts);
+#else
 	system_fonts.clear();
 	system_font_data.clear();
+#endif
 }
 
 void TextServerFallback::_cleanup() {

@@ -35,6 +35,9 @@
 /* BiDi, shaping and advanced font features support.                     */
 /*************************************************************************/
 
+#ifdef METON_GAME_ATLAS_ENABLED
+#include "meton_font_atlas.h"
+#endif
 #include "core/extension/ext_wrappers.gen.h"
 #include "core/templates/hash_map.h"
 #include "core/templates/rid_owner.h"
@@ -122,6 +125,10 @@ class TextServerFallback : public TextServerExtension {
 
 		Ref<Image> image;
 		Ref<ImageTexture> texture;
+#ifdef METON_GAME_ATLAS_ENABLED
+		std::shared_ptr<MetonFontAtlasPage> atlas_page;
+		bool upload(const Ref<Image> &p_image);
+#endif
 		bool dirty = true;
 
 		List<Shelf> shelves;
@@ -176,6 +183,9 @@ class TextServerFallback : public TextServerExtension {
 	};
 
 	struct FontFallback;
+#ifdef METON_GAME_ATLAS_ENABLED
+	struct SystemFontStore;
+#endif
 	struct FontForSizeFallback {
 		double ascent = 0.0;
 		double descent = 0.0;
@@ -220,6 +230,10 @@ class TextServerFallback : public TextServerExtension {
 
 	struct FontFallback {
 		Mutex mutex;
+#ifdef METON_GAME_ATLAS_ENABLED
+		std::shared_ptr<MetonFontAtlasOwner> atlas_owner;
+		SystemFontStore *local_system_fonts = nullptr;
+#endif
 
 		TextServer::FontAntialiasing antialiasing = TextServer::FONT_ANTIALIASING_GRAY;
 		bool disable_embedded_bitmaps = true;
@@ -264,6 +278,10 @@ class TextServerFallback : public TextServerExtension {
 		int face_index = 0;
 
 #ifdef MODULE_FREETYPE_ENABLED
+#ifdef METON_GAME_ATLAS_ENABLED
+		FT_MemoryRec_ atlas_ft_memory{};
+		FT_Library atlas_ft_library = nullptr;
+#endif
 		FT_Face face = nullptr;
 		FT_StreamRec stream;
 #endif
@@ -277,10 +295,20 @@ class TextServerFallback : public TextServerExtension {
 			if (face != nullptr) {
 				FT_Done_Face(face);
 			}
+#ifdef METON_GAME_ATLAS_ENABLED
+			if (atlas_ft_library) {
+				FT_Done_Library(atlas_ft_library);
+			}
+#endif
 #endif
 		}
 	};
 
+#ifdef METON_GAME_ATLAS_ENABLED
+#ifdef MODULE_FREETYPE_ENABLED
+	FT_Error _font_library(FontFallback *p_font, FT_Library &r_library) const;
+#endif
+#endif
 	_FORCE_INLINE_ FontTexturePosition find_texture_pos_for_glyph(FontForSizeFallback *p_data, int p_color_size, Image::Format p_image_format, int p_width, int p_height, bool p_msdf) const;
 #ifdef MODULE_MSDFGEN_ENABLED
 	_FORCE_INLINE_ FontGlyph rasterize_msdf(FontFallback *p_font_data, FontForSizeFallback *p_data, int p_pixel_range, int p_rect_margin, FT_Outline *p_outline, const Vector2 &p_advance) const;
@@ -552,8 +580,17 @@ class TextServerFallback : public TextServerExtension {
 			return hash_fmix32(hash_murmur3_one_32(((int)p_a.mipmaps) | ((int)p_a.msdf << 1) | ((int)p_a.italic << 2) | ((int)p_a.force_autohinter << 3) | ((int)p_a.hinting << 4) | ((int)p_a.subpixel_positioning << 8) | ((int)p_a.antialiasing << 12) | ((int)p_a.disable_embedded_bitmaps << 14) | ((int)p_a.keep_rounding_remainders << 15), hash));
 		}
 	};
+#ifdef METON_GAME_ATLAS_ENABLED
+	struct SystemFontStore {
+		HashMap<SystemFontKey, SystemFontCache, SystemFontKeyHasher> fonts;
+		HashMap<String, PackedByteArray> data;
+	};
+	SystemFontStore shared_system_fonts;
+	void _clear_system_font_store(SystemFontStore &p_store);
+#else
 	mutable HashMap<SystemFontKey, SystemFontCache, SystemFontKeyHasher> system_fonts;
 	mutable HashMap<String, PackedByteArray> system_font_data;
+#endif
 
 	void _generate_runs(ShapedTextDataFallback *p_sd) const;
 	void _realign(ShapedTextDataFallback *p_sd) const;
@@ -568,6 +605,10 @@ protected:
 	void invalidate(ShapedTextDataFallback *p_shaped);
 
 public:
+#ifdef METON_GAME_ATLAS_ENABLED
+	// Supplied only by the game host before the font is installed on any Control.
+	bool use_private_system_font_cache(const RID &p_font_rid);
+#endif
 	MODBIND1RC(bool, has_feature, Feature);
 	MODBIND0RC(String, get_name);
 	MODBIND0RC(int64_t, get_features);

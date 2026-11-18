@@ -44,6 +44,10 @@
 #include "servers/rendering/shader_include_db.h"
 
 #include "modules/modules_enabled.gen.h"
+#ifdef METON_JS_GAME_ENABLED
+extern void meton_game_texture_retiring(uint64_t p_rid, const void *p_driver, uint64_t p_texture);
+extern void meton_game_texture_disposed(const void *p_driver, uint64_t p_texture);
+#endif
 
 #ifdef MODULE_GLSLANG_ENABLED
 #include "modules/glslang/shader_compile.h"
@@ -7642,6 +7646,10 @@ void RenderingDevice::_free_internal(RID p_id) {
 			}
 		}
 
+#ifdef METON_JS_GAME_ENABLED
+        // RID 从表中移除后，GPU 分配仍可能存活；把同一身份交给实际设备释放回执。
+        meton_game_texture_retiring(p_id.get_id(), driver, texture->driver_id.id);
+#endif
 		frames[frame].textures_to_dispose_of.push_back(*texture);
 		texture_owner.free(p_id);
 	} else if (framebuffer_owner.owns(p_id)) {
@@ -8005,6 +8013,10 @@ void RenderingDevice::_free_pending_resources(int p_frame) {
 
 		texture_memory -= driver->texture_get_allocation_size(texture->driver_id);
 		driver->texture_free(texture->driver_id);
+#ifdef METON_JS_GAME_ENABLED
+        // 此队列在对应帧完成后清理；不得提前在 free_rid 时归还游戏额度。
+        meton_game_texture_disposed(driver, texture->driver_id.id);
+#endif
 
 		frames[p_frame].textures_to_dispose_of.pop_front();
 	}

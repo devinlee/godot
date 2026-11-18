@@ -41,6 +41,15 @@
 #include "core/string/print_string.h"
 #include "core/string/translation_server.h"
 #include "core/variant/typed_array.h"
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_METON_WEB_GAME_ENABLED
+extern bool meton_web_predelete_guard(Object *p_object);
+#endif
+
+#ifdef METON_JS_GAME_ENABLED
+// 仅复验游戏绑定登记的销毁请求；放在任何退出通知之前，避免已经影响私有子树再拒绝。
+extern bool meton_game_predelete_guard(Object *p_object);
+#endif
 
 #ifdef DEBUG_ENABLED
 
@@ -169,6 +178,18 @@ Object::Connection::Connection(const Variant &p_variant) {
 }
 
 bool Object::_predelete() {
+#ifdef MODULE_METON_WEB_GAME_ENABLED
+	if (!meton_web_predelete_guard(this)) {
+		_is_queued_for_deletion = false;
+		return false;
+	}
+#endif
+#ifdef METON_JS_GAME_ENABLED
+	if (!meton_game_predelete_guard(this)) {
+		_is_queued_for_deletion = false;
+		return false;
+	}
+#endif
 	_predelete_ok = true;
 	notification(NOTIFICATION_PREDELETE, true);
 	if (!_predelete_ok) {

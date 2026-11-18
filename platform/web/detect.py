@@ -138,7 +138,7 @@ def configure(env: "SConsEnvironment"):
     while emcc_path.is_symlink():
         # For some reason, mypy trips on `Path.readlink` not being defined, somehow.
         emcc_path = emcc_path.readlink()  # type: ignore[attr-defined]
-    emscripten_include_path = emcc_path.parent.joinpath("cache", "sysroot", "include")
+    emscripten_include_path = Path(os.environ.get("EM_CACHE", str(emcc_path.parent / "cache"))) / "sysroot" / "include"
     env.Append(CPPPATH=[emscripten_include_path])
 
     ## Configure assertions.

@@ -118,6 +118,8 @@ private:
 	VariantParser::ResourceParser rp;
 
 	friend class ResourceFormatLoaderText;
+	// G04 只给原生解析器已固定的内存文件和私有缓存路径，不安装全局文件系统替身。
+	friend class MetonGameMaterialLoader;
 	friend class ResourceFormatSaverText;
 #ifdef TOOLS_ENABLED
 	friend class MetonSceneHistoryLoader;

@@ -2126,6 +2126,8 @@ void TextureStorage::texture_debug_usage(List<RenderingServerTypes::TextureInfo>
 			continue;
 		}
 		RenderingServerTypes::TextureInfo tinfo;
+		// 为所属游戏的释放核对交出实际 RID，不用路径或空身份替代。
+		tinfo.texture = rid;
 		tinfo.path = t->path;
 		tinfo.format = t->format;
 		tinfo.width = t->width;

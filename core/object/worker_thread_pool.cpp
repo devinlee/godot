@@ -30,6 +30,8 @@
 
 #include "worker_thread_pool.h"
 
+#include "modules/modules_enabled.gen.h"
+
 #include "core/object/class_db.h"
 #include "core/object/message_queue.h"
 #include "core/object/script_language.h"
@@ -725,7 +727,7 @@ bool WorkerThreadPool::is_group_task_completed(GroupID p_group) const {
 }
 
 void WorkerThreadPool::wait_for_group_task_completion(GroupID p_group) {
-#ifdef THREADS_ENABLED
+#if defined(THREADS_ENABLED) || defined(MODULE_METON_WEB_GAME_ENABLED)
 	task_mutex.lock();
 	Group **groupp = groups.getptr(p_group);
 	task_mutex.unlock();
@@ -736,6 +738,8 @@ void WorkerThreadPool::wait_for_group_task_completion(GroupID p_group) {
 	{
 		Group *group = *groupp;
 
+		// Web 单线程任务已同步完成；仍回收任务组，只有线程模式需要等待。
+#ifdef THREADS_ENABLED
 		if (this == singleton) {
 			_unlock_unlockable_mutexes();
 		}
@@ -743,6 +747,7 @@ void WorkerThreadPool::wait_for_group_task_completion(GroupID p_group) {
 		if (this == singleton) {
 			_lock_unlockable_mutexes();
 		}
+#endif
 
 		uint32_t max_users = group->tasks_used + 1; // Add 1 because the thread waiting for it is also user. Read before to avoid another thread freeing task after increment.
 		uint32_t finished_users = group->finished.increment(); // fetch happens before inc, so increment later.

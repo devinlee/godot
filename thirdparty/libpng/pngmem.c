@@ -17,6 +17,13 @@
  */
 
 #include "pngpriv.h"
+#include "modules/modules_enabled.gen.h"
+#if defined(MODULE_METON_JS_ENABLED) || defined(MODULE_METON_WEB_GAME_ENABLED)
+#include "modules/meton_js/meton_native_memory_abi.h"
+/* 内置 PNG 与 zlib 回调的申请沿用原生资源预算，释放不依赖当前作用域。 */
+#define malloc meton_resource_alloc
+#define free meton_resource_free
+#endif
 
 #if defined(PNG_READ_SUPPORTED) || defined(PNG_WRITE_SUPPORTED)
 /* Free a png_struct */

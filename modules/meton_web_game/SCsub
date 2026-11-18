@@ -1,0 +1,4 @@
+Import('env')
+env.add_source_files(env.modules_sources, '*.cpp')
+# 分配头、跨线程归还及预算只有一份实现；不引入原生 V8 或对象绑定。
+env.add_source_files(env.modules_sources, '../meton_js/meton_native_memory.cpp')

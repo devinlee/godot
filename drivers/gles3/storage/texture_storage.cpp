@@ -29,6 +29,11 @@
 /**************************************************************************/
 
 #include "texture_storage.h"
+#include "modules/modules_enabled.gen.h"
+#ifdef MODULE_METON_WEB_GAME_ENABLED
+extern void meton_web_texture_deleted(uint64_t p_rid);
+extern void meton_web_texture_poll();
+#endif
 
 #ifdef GLES3_ENABLED
 
@@ -1020,6 +1025,9 @@ void TextureStorage::texture_free(RID p_texture) {
 	}
 	if (must_free_data) {
 		GLES3::Utilities::get_singleton()->texture_free_data(t->tex_id);
+#ifdef MODULE_METON_WEB_GAME_ENABLED
+		meton_web_texture_deleted(p_texture.get_id());
+#endif
 		t->tex_id = 0;
 	}
 
@@ -1919,6 +1927,7 @@ void TextureStorage::texture_debug_usage(List<RenderingServerTypes::TextureInfo>
 			continue;
 		}
 		RenderingServerTypes::TextureInfo tinfo;
+		tinfo.texture = rid;
 		tinfo.path = t->path;
 		tinfo.format = t->format;
 		tinfo.width = t->alloc_width;
@@ -2323,6 +2332,10 @@ GLuint TextureStorage::texture_atlas_get_texture() const {
 }
 
 void TextureStorage::update_texture_atlas() {
+#ifdef MODULE_METON_WEB_GAME_ENABLED
+	// 独立于游戏角色回调，原生游戏销毁后仍收集已发出的释放确认。
+	meton_web_texture_poll();
+#endif
 	CopyEffects *copy_effects = CopyEffects::get_singleton();
 	ERR_FAIL_NULL(copy_effects);
 

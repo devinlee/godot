@@ -65,6 +65,7 @@ class RDPipelineShader;
 class RDHitGroup;
 
 class RenderingDevice : public RenderingDeviceCommons {
+    friend void meton_game_texture_gpu_fence();
 	GDCLASS(RenderingDevice, Object)
 
 	_THREAD_SAFE_CLASS_

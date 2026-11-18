@@ -311,6 +311,12 @@ void RenderingServerDefault::finish() {
 			server_task_id = WorkerThreadPool::INVALID_TASK_ID;
 		}
 		server_thread = Thread::MAIN_ID;
+#ifdef METON_JS_GAME_ENABLED
+		// 渲染任务已结束，设备仍由显示服务器在收尾线程销毁；必须交回线程身份。
+		if (RenderingDevice *rd = RenderingDevice::get_singleton()) {
+			rd->make_current();
+		}
+#endif
 	} else {
 		_finish();
 	}
