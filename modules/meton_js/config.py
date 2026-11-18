@@ -21,12 +21,19 @@ def configure(env):
     env.AppendUnique(CPPDEFINES=["METON_JS_GAME_ENABLED" if role == "game" else "METON_JS_TASK_ENABLED"])
     if role == "game":
         env.AppendUnique(CPPDEFINES=["METON_GAME_ATLAS_ENABLED"])
+    if env.get("meton_js_depfiles", False):
+        # 每个对象单独记录编译器实际读取的头文件，避免并发覆盖同名源文件的回执。
+        env.Append(CCFLAGS=["/sourceDependencies", "${TARGET}.sources.json"])
+        # MSVC 要求选项与参数在响应文件同一行；SCons 的默认换行会触发 D8004。
+        env["TEMPFILEARGJOIN"] = " "
+        env.Append(LINKFLAGS=["/VERBOSE:LIB"])
 
 
 def get_opts(platform):
-    from SCons.Variables import EnumVariable
+    from SCons.Variables import BoolVariable, EnumVariable
     # 非运行配置默认不启用，路径只在选定角色后检查，避免影响 GW2 的原配置。
     return [EnumVariable("meton_js_role", "原生 JS 的唯一构建角色", "none", ("none", "game", "task")),
+            BoolVariable("meton_js_depfiles", "记录本次实际编译输入", False),
             ("meton_js_identity_dir", "本组合生成的角色身份目录", ""),
             ("meton_v8_root", "已核对的 V8 源码与库目录", ""),
             ("meton_v8_builtins", "同一编译材料的 Windows compiler-rt", "")]
