@@ -80,7 +80,7 @@ public:
         if (!content) return {};
         if (p_size <= 0 || (p_channels != 2 && p_channels != 4)) { set_fault(ERR_UNAVAILABLE); return {}; }
         const uint64_t side = uint64_t(p_size);
-        if (side > MetonTextureSupport::PIXELS / side) {
+        if (side > MetonGameRuntimeProfile::GPU_PIXELS / side) {
             ++content->texture_refusals;
             set_fault(ERR_OUT_OF_MEMORY);
             return {};
@@ -148,7 +148,7 @@ Error MetonGameContent::reserve_texture_space(uint64_t p_pixels, uint64_t p_byte
     reap_textures();
     uint64_t pixels, bytes;
     texture_usage(pixels, bytes);
-    if (pixels > MetonTextureSupport::PIXELS || p_pixels > MetonTextureSupport::PIXELS - pixels ||
+    if (pixels > MetonGameRuntimeProfile::GPU_PIXELS || p_pixels > MetonGameRuntimeProfile::GPU_PIXELS - pixels ||
             bytes > MetonTextureSupport::TEXTURE_BYTES || p_bytes > MetonTextureSupport::TEXTURE_BYTES - bytes ||
             p_decode > MetonTextureSupport::NATIVE_BYTES) {
         ++texture_refusals;

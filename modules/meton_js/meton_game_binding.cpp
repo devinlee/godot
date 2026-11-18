@@ -5,6 +5,7 @@
 #include "meton_game_counts.generated.h"
 #include "meton_game_textures.generated.h"
 #include "meton_game_memory.generated.h"
+#include "meton_game_runtime_profile.generated.h"
 #include "meton_world_inspector.generated.h"
 #include "meton_game_support.generated.h"
 #include "meton_game_identity.generated.h"
@@ -271,6 +272,17 @@ Dictionary MetonGameBinding::support() {
     result["godot_revision"] = GODOT_REVISION;
     result["v8_version"] = v8::V8::GetVersion();
     result["binding_digest"] = METON_GAME_BINDING_DIGEST;
+    result["content_profile"] = "gw3-native-content-v1";
+    result["description_digest"] = MetonMemorySupport::INPUT_DIGEST;
+    result["runtime_profile_digest"] = MetonGameRuntimeProfile::INPUT_DIGEST;
+    result["runtime_profile"] = MetonGameRuntimeProfile::PROFILE;
+    result["gpu_pixels"] = int64_t(MetonGameRuntimeProfile::GPU_PIXELS);
+    Dictionary content_limits;
+    content_limits["files"] = MetonResourceSupport::CONTENT_FILES;
+    content_limits["bytes"] = MetonResourceSupport::CONTENT_BYTES;
+    content_limits["depth"] = MetonResourceSupport::CONTENT_DEPTH;
+    content_limits["pixels"] = MetonResourceSupport::GPU_PIXELS;
+    result["content_limits"] = content_limits;
     result["support_digest"] = MetonUiSupport::INPUT_DIGEST;
     result["world_support_digest"] = MetonWorldSupport::INPUT_DIGEST;
     result["ui_candidate"] = true;
