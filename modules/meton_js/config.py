@@ -5,8 +5,8 @@ def can_build(env, platform):
     role = env.get("meton_js_role", "none")
     if role == "none":
         return False
-    if platform != "windows" or env["arch"] != "x86_64":
-        raise RuntimeError("当前原生 JS 角色只交接 Windows x64，不能静默改用其他执行器")
+    if platform not in ("windows", "linuxbsd") or env["arch"] != "x86_64":
+        raise RuntimeError("此原生 JS 源码要求 Windows 或 Linux x86_64")
     return True
 
 
@@ -19,9 +19,17 @@ def configure(env):
         raise RuntimeError("GW3 需要本次实际源码与配置生成的角色身份，不能复用 JR2 候选身份")
     env.AppendUnique(CPPPATH=[str(identity.resolve())])
     env.AppendUnique(CPPDEFINES=["METON_JS_GAME_ENABLED" if role == "game" else "METON_JS_TASK_ENABLED"])
+    linux = env["platform"] == "linuxbsd"
+    if linux:
+        env.AppendUnique(CPPDEFINES=["METON_JS_LINUX_ENABLED"])
+        if role == "game" and not (identity / "meton_linux_game_profile.generated.h").is_file():
+            raise RuntimeError("Linux 游戏需要与本次库和源码匹配的目标策略")
     if role == "game":
         env.AppendUnique(CPPDEFINES=["METON_GAME_ATLAS_ENABLED"])
     if env.get("meton_js_depfiles", False):
+        if linux:
+            env.Append(CCFLAGS=["-MD", "-MF", "${TARGET}.sources.d"])
+            return
         # 每个对象单独记录编译器实际读取的头文件，避免并发覆盖同名源文件的回执。
         env.Append(CCFLAGS=["/sourceDependencies", "${TARGET}.sources.json"])
         # MSVC 要求选项与参数在响应文件同一行；SCons 的默认换行会触发 D8004。

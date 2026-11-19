@@ -1,7 +1,7 @@
 #include "meton_game_content.h"
 #include "meton_game_binding.h"
 #include "meton_game_textures.generated.h"
-#include "meton_game_runtime_profile.generated.h"
+#include "meton_native_game_profile.h"
 #include "core/io/image.h"
 #include "core/object/callable_mp.h"
 #include "scene/resources/image_texture.h"

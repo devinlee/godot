@@ -5,7 +5,7 @@
 #include "meton_game_counts.generated.h"
 #include "meton_game_textures.generated.h"
 #include "meton_game_memory.generated.h"
-#include "meton_game_runtime_profile.generated.h"
+#include "meton_native_game_profile.h"
 #include "meton_world_inspector.generated.h"
 #include "meton_game_support.generated.h"
 #include "meton_game_identity.generated.h"
@@ -269,7 +269,7 @@ v8::Local<v8::Module> MetonGameBinding::module() {
 Dictionary MetonGameBinding::support() {
     Dictionary result;
     result["format_version"] = 1;
-    result["godot_revision"] = GODOT_REVISION;
+    result["godot_revision"] = MetonGameRuntimeProfile::ENGINE_REVISION;
     result["v8_version"] = v8::V8::GetVersion();
     result["binding_digest"] = METON_GAME_BINDING_DIGEST;
     result["content_profile"] = "gw3-native-content-v1";
@@ -283,7 +283,7 @@ Dictionary MetonGameBinding::support() {
     content_limits["depth"] = MetonResourceSupport::CONTENT_DEPTH;
     content_limits["pixels"] = MetonResourceSupport::GPU_PIXELS;
     result["content_limits"] = content_limits;
-    result["support_digest"] = MetonUiSupport::INPUT_DIGEST;
+    result["support_digest"] = MetonGameRuntimeProfile::TARGET_SUPPORT;
     result["world_support_digest"] = MetonWorldSupport::INPUT_DIGEST;
     result["ui_candidate"] = true;
     result["world_candidate"] = true;
@@ -299,7 +299,7 @@ Dictionary MetonGameBinding::support() {
     result["objects_candidate"] = true;
     result["resources_candidate"] = true;
     result["metadata_digest"] = METADATA_DIGEST;
-    result["target"] = "windows-x64";
+    result["target"] = MetonGameRuntimeProfile::TARGET;
     result["precision_bytes"] = int(sizeof(real_t));
     result["runtime_verified"] = false;
     Array classes_report, members_report;

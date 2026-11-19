@@ -3,22 +3,33 @@ Import("env_modules")
 from pathlib import Path
 import os
 
-expected_compiler = os.environ.get("METON_V8_MSVC_COMPILER", "")
+linux = env["platform"] == "linuxbsd"
+expected_compiler = os.environ.get("METON_V8_LINUX_COMPILER" if linux else "METON_V8_MSVC_COMPILER", "")
 if not expected_compiler or Path(env.WhereIs(env["CXX"])).resolve() != Path(expected_compiler).resolve():
     raise RuntimeError("SCons 实际编译器与本轮锁不符")
 
 root = Path(env["meton_v8_root"])
-output = root / "out/meton-windows-x64"
+output = root / ("out/meton-linux-x64" if linux else "out/meton-windows-x64")
 # 对象编译可先行；完整装配由构建入口核对库回执，SCons 链接仍依赖真实库。
 bridge = env_modules.Clone()
 bridge.Append(CPPPATH=[str(root / "include"), str(output / "gen/include")])
 # 配置头与实际库同源，避免指针压缩等 ABI 参数在绑定中自行猜测。
-bridge.Append(CPPDEFINES=["V8_GN_HEADER", "NOMINMAX"])
-bridge["CXXFLAGS"] = [flag for flag in bridge["CXXFLAGS"] if not str(flag).startswith("/std:")]
-bridge["CCFLAGS"] = [flag for flag in bridge["CCFLAGS"] if str(flag) not in ("/GR", "/GR-")]
-bridge.Append(CXXFLAGS=["/std:c++20"])
-bridge.Append(CCFLAGS=["/GR-"])
-sources = ["register_types.cpp", "meton_js_runtime.cpp", "meton_native_memory.cpp"]
+bridge.Append(CPPDEFINES=["V8_GN_HEADER"])
+sources = ["register_types.cpp", "meton_native_memory.cpp"]
+if linux:
+    bridge["CXXFLAGS"] = [flag for flag in bridge["CXXFLAGS"] if not str(flag).startswith("-std=")]
+    bridge.Append(CXXFLAGS=["-std=c++20"])
+    # 分配器派生自未生成 RTTI 的 V8。其余绑定需要 Godot 资源容器的类型信息。
+    runtime = bridge.Clone()
+    runtime.Append(CXXFLAGS=["-fno-rtti"])
+    runtime.add_source_files(env.modules_sources, ["meton_js_runtime.cpp"])
+else:
+    bridge.Append(CPPDEFINES=["NOMINMAX"])
+    bridge["CXXFLAGS"] = [flag for flag in bridge["CXXFLAGS"] if not str(flag).startswith("/std:")]
+    bridge["CCFLAGS"] = [flag for flag in bridge["CCFLAGS"] if str(flag) not in ("/GR", "/GR-")]
+    bridge.Append(CXXFLAGS=["/std:c++20"])
+    bridge.Append(CCFLAGS=["/GR-"])
+    sources.insert(1, "meton_js_runtime.cpp")
 if env["meton_js_role"] == "game":
     sources += ["meton_game_binding.cpp", "meton_game_script.cpp", "meton_game_signals.cpp",
                 "meton_game_promises.cpp", "meton_game_objects.cpp", "meton_game_resources.cpp",
@@ -30,7 +41,10 @@ else:
     raise RuntimeError("原生 JS 构建缺少唯一角色")
 bridge.add_source_files(env.modules_sources, sources)
 # File 节点保留实际库名；普通字符串会被 Godot 的配置后缀再次改写。
-env.Append(LIBS=[env.File(str(output / "obj/v8_monolith.lib")),
-                env.File(env["meton_v8_builtins"])])
-# Windows SDK 库沿上游 LINKFLAGS 写法，不能走带 Godot 配置后缀的 LIBS。
-env.AppendUnique(LINKFLAGS=["winmm.lib", "dbghelp.lib", "shlwapi.lib"])
+if linux:
+    env.Append(LIBS=[env.File(str(output / "obj/libv8_monolith.a"))])
+else:
+    env.Append(LIBS=[env.File(str(output / "obj/v8_monolith.lib")),
+                    env.File(env["meton_v8_builtins"])])
+    # Windows SDK 库沿上游 LINKFLAGS 写法，不能走带 Godot 配置后缀的 LIBS。
+    env.AppendUnique(LINKFLAGS=["winmm.lib", "dbghelp.lib", "shlwapi.lib"])

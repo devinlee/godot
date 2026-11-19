@@ -7,7 +7,7 @@
 #include "meton_game_counts.generated.h"
 #include "meton_game_textures.generated.h"
 #include "meton_game_memory.generated.h"
-#include "meton_game_runtime_profile.generated.h"
+#include "meton_native_game_profile.h"
 #include "core/crypto/crypto_core.h"
 #include "core/io/file_access_memory.h"
 #include "core/io/image.h"
@@ -155,7 +155,7 @@ bool MetonGameContent::install(const String &p_json, const String &p_digest, con
         if (!fields(consumer, {"binding_digest", "description_digest", "runtime_profile_digest", "target", "limits"}) ||
                 consumer["binding_digest"] != Variant(METON_GAME_BINDING_DIGEST) || consumer["description_digest"] != Variant(MetonMemorySupport::INPUT_DIGEST) ||
                 consumer["runtime_profile_digest"] != Variant(MetonGameRuntimeProfile::INPUT_DIGEST) ||
-                consumer["target"] != Variant("windows-x64") || consumer["limits"].get_type() != Variant::DICTIONARY) return false;
+                consumer["target"] != Variant(MetonGameRuntimeProfile::TARGET) || consumer["limits"].get_type() != Variant::DICTIONARY) return false;
         consumer_limits = consumer["limits"];
         const String content_json = snapshot["content_json"];
         if (Variant(content_json.sha256_text()) != snapshot["content_digest"] || json.parse(content_json) != OK || json.get_data().get_type() != Variant::DICTIONARY) return false;
@@ -170,10 +170,13 @@ bool MetonGameContent::install(const String &p_json, const String &p_digest, con
     Dictionary build = source["build"];
     // 旧候选格式仍核对原身份；GW3 消费封套已核对实际绑定，不混用生产者和执行者字段。
     if (!fields(build, {"source_sha", "build_id", "engine_digest", "host_digest", "policy_digest", "protocol_version", "platform", "graphics"}) ||
-            build["platform"] != Variant("windows-x64") || build["protocol_version"] != Variant("0.1.0") ||
+            build["platform"] != Variant(MetonGameRuntimeProfile::TARGET) || build["protocol_version"] != Variant("0.1.0") ||
             !fields(limits, {"files", "bytes", "depth", "pixels"})) return false;
-    if (!project_content && (build["source_sha"] != Variant(MetonGameSupport::GODOT_REVISION) || build["host_digest"] != Variant(METON_GAME_BINDING_DIGEST) ||
-            build["policy_digest"] != Variant(MetonMemorySupport::INPUT_DIGEST))) return false;
+#ifdef METON_JS_LINUX_ENABLED
+    if (build["graphics"] != Variant(MetonGameRuntimeProfile::DRIVER)) return false;
+#endif
+    if (!project_content && (build["source_sha"] != Variant(MetonGameRuntimeProfile::ENGINE_REVISION) || build["host_digest"] != Variant(METON_GAME_BINDING_DIGEST) ||
+            build["policy_digest"] != Variant(MetonGameRuntimeProfile::CONTENT_POLICY))) return false;
     if (project_content && !fields(consumer_limits, {"files", "bytes", "depth", "pixels"})) return false;
     const Dictionary applied_limits = project_content ? consumer_limits : limits;
     const std::pair<const char *, int> maxima[] = {{"files", MetonResourceSupport::CONTENT_FILES}, {"bytes", MetonResourceSupport::CONTENT_BYTES},
