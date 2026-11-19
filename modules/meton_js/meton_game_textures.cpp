@@ -47,7 +47,7 @@ void meton_game_texture_gpu_fence() {
 /** 空渲染器不能提供实际 GPU 资源事实，也不能用空表冒充全部释放。 */
 bool MetonGameContent::texture_backend_available() const {
     return DisplayServer::get_singleton() && String(DisplayServer::get_singleton()->get_name()) != "headless" &&
-        RenderingServer::get_singleton()->get_current_rendering_driver_name() == "d3d12";
+        RenderingServer::get_singleton()->get_current_rendering_driver_name() == MetonGameRuntimeProfile::DRIVER;
 }
 /** 只有原生引用结束且渲染队列已处理删除才能归还载荷额度。 */
 void MetonGameContent::reap_textures() {

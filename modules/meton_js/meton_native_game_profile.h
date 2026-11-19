@@ -10,6 +10,7 @@
 
 namespace MetonGameRuntimeProfile {
 inline constexpr const char *TARGET = "windows-x64";
+inline constexpr const char *DRIVER = "d3d12";
 inline constexpr const char *ENGINE_REVISION = MetonGameSupport::GODOT_REVISION;
 inline constexpr const char *TARGET_SUPPORT = MetonUiSupport::INPUT_DIGEST;
 inline constexpr const char *CONTENT_POLICY = MetonMemorySupport::INPUT_DIGEST;
