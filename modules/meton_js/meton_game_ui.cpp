@@ -9,6 +9,12 @@
 #include "scene/main/viewport.h"
 #include "scene/theme/theme_db.h"
 #include "scene/theme/default_font.gen.h"
+#ifdef METON_JS_LINUX_ENABLED
+#include <meton_linux_game_profile.generated.h>
+#ifdef METON_LINUX_OWNED_CJK_FONT
+#include <meton_linux_cjk_font.generated.h>
+#endif
+#endif
 #include "modules/text_server_fb/meton_font_cache.h"
 #include "core/object/callable_mp.h"
 #include <cmath>
@@ -97,6 +103,23 @@ bool MetonGameUi::ensure_font() {
     auto owner = binding->content->new_font_atlas_owner();
     const RID face = meton_create_font_atlas(*font.ptr(), owner);
     if (!face.is_valid() || !meton_isolate_system_font_cache(face)) return false;
+#ifdef METON_LINUX_OWNED_CJK_FONT
+    // 离线中文字面与主字面共享本局图集所有者、计费和释放。
+    Ref<FontFile> cjk;
+    cjk.instantiate();
+    cjk->set_data_ptr(MetonLinuxCjk::DATA, sizeof(MetonLinuxCjk::DATA));
+    cjk->set_antialiasing(font->get_antialiasing());
+    cjk->set_hinting(font->get_hinting());
+    cjk->set_subpixel_positioning(font->get_subpixel_positioning());
+    cjk->set_multichannel_signed_distance_field(font->is_multichannel_signed_distance_field());
+    cjk->set_generate_mipmaps(font->get_generate_mipmaps());
+    cjk->set_allow_system_fallback(font->is_allow_system_fallback());
+    const RID cjk_face = meton_create_font_atlas(*cjk.ptr(), owner);
+    if (!cjk_face.is_valid() || !meton_isolate_system_font_cache(cjk_face)) return false;
+    TypedArray<Font> fallbacks;
+    fallbacks.push_back(cjk);
+    font->set_fallbacks(fallbacks);
+#endif
     font_atlas = owner;
     private_font = font;
     return true;
